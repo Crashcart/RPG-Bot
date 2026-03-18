@@ -31,6 +31,7 @@ from orchestrator.services import (
     GeminiClient,
     OllamaClient,
     RAGService,
+    StoryMemoryService,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -39,17 +40,18 @@ logging.basicConfig(level=settings.log_level)
 logger = logging.getLogger(__name__)
 
 # Shared service instances (initialised in lifespan)
-db     = DatabaseService(settings)
-cache  = CacheService(settings)
-rag    = RAGService(settings)
-ollama = OllamaClient(settings)
-gemini = GeminiClient(settings)
+db           = DatabaseService(settings)
+cache        = CacheService(settings)
+rag          = RAGService(settings)
+ollama       = OllamaClient(settings)
+gemini       = GeminiClient(settings)
+story_memory = StoryMemoryService(settings)
 
 # Pipeline phase singletons
 ingestion    = IngestionPhase(db, rag)
 adjudication = AdjudicationPhase(ollama)
 state_commit = StateCommitPhase(db, cache)
-narration    = NarrationPhase(gemini)
+narration    = NarrationPhase(gemini, story_memory)
 
 
 @asynccontextmanager
@@ -58,6 +60,8 @@ async def lifespan(app: FastAPI):
     await db.connect()
     await cache.connect()
     await rag.connect()
+    # story_memory shares the DB pool rather than opening its own connection
+    await story_memory.connect(db.pool)
     yield
     logger.info("Shutting down Ironclad GM Orchestrator…")
     await db.disconnect()
@@ -122,13 +126,14 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
         # ── Phase 3: State Commitment ─────────────────────────────────────────
         commit = await state_commit.commit(resolution)
 
-        # ── Phase 4: Narrative Generation ─────────────────────────────────────
+        # ── Phase 4: Narrative Generation (with story memory) ─────────────────
         narrative = await narration.narrate(
             resolution=resolution,
             commit=commit,
             character=context.character,
             player_intent=intent.raw_input,
             campaign_system=campaign_system,
+            campaign_id=campaign_id,
         )
 
         # ── Persist audit log ─────────────────────────────────────────────────

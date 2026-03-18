@@ -25,13 +25,22 @@ class GeminiClient:
         self, request: NarrativeRequestPayload
     ) -> NarrativeResponsePayload:
         """
-        Send the mechanical truth + player intent to Gemini for narrative prose.
-        The system prompt enforces the anti-sycophancy and mechanical truth locks.
+        Send the mechanical truth + player intent + story memory to Gemini.
+        The system prompt enforces the anti-sycophancy, mechanical truth, and
+        story continuity locks so Gemini cannot hallucinate contradictions.
         """
         mechanical_truth_json = request.mechanical_truth.model_dump_json(indent=2)
+
+        # Format established world facts as bullet lines for the continuity lock
+        story_lines = [
+            f"[{f.entity_type.value.upper()}] {f.entity_name}: {f.summary}"
+            for f in request.story_context
+        ] if request.story_context else []
+
         system_prompt = build_narrative_system_prompt(
             system=request.campaign_system,
             mechanical_truth_json=mechanical_truth_json,
+            story_context_lines=story_lines,
         )
 
         user_content = (

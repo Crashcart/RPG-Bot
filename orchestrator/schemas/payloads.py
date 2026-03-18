@@ -240,6 +240,45 @@ class StateCommitPayload(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Story Memory Schemas (used in Phase 4 for continuity)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class StoryEntityType(str, Enum):
+    NPC          = "npc"
+    LOCATION     = "location"
+    EVENT        = "event"
+    WORLD_FACT   = "world_fact"
+    PLOT_THREAD  = "plot_thread"
+
+
+class StoryFact(BaseModel):
+    """
+    A single established world fact retrieved from the story memory store.
+    Injected verbatim into the Gemini prompt so the narrator cannot contradict it.
+    """
+    fact_id:       str
+    entity_type:   StoryEntityType
+    entity_name:   str
+    summary:       str   = Field(..., description="One-sentence fact the GM must honour")
+    detail:        str   = Field(default="", description="Extended context")
+    relevance:     float = Field(default=1.0, ge=0.0, le=1.0)
+    established_at: datetime
+
+
+class ExtractedFact(BaseModel):
+    """Schema for a single fact extracted from a generated narrative by Gemini."""
+    entity_type:  StoryEntityType
+    entity_name:  str
+    summary:      str
+    detail:       str = ""
+
+
+class ExtractionResult(BaseModel):
+    """Container returned by the post-narration fact extraction call."""
+    facts: list[ExtractedFact] = Field(default_factory=list)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Phase 4 – Narrative Generation Schema: Orchestrator → Gemini → Discord
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -260,9 +299,9 @@ class MechanicalTruth(BaseModel):
 
 class NarrativeRequestPayload(BaseModel):
     """
-    Phase 4 input – contains the player intent AND the mechanical truth.
-    Gemini receives this and must produce vivid storytelling WITHOUT
-    contradicting any mechanical field.
+    Phase 4 input – contains the player intent, the mechanical truth, and
+    the retrieved story memory context. Gemini must not contradict any
+    established fact or any mechanical field.
     """
     prompt_id:          str  = Field(default_factory=lambda: str(uuid.uuid4()))
     intent_id:          str
@@ -270,6 +309,11 @@ class NarrativeRequestPayload(BaseModel):
     mechanical_truth:   MechanicalTruth
     character_context:  CharacterSnapshot
     campaign_system:    str  = Field(..., description="Active TTRPG system name")
+    story_context:      list[StoryFact] = Field(
+        default_factory=list,
+        description="Established world facts retrieved from story memory; "
+                    "Gemini must treat these as immutable canon.",
+    )
     requested_at:       datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

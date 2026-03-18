@@ -3,6 +3,7 @@ from .cache import CacheService
 from .ollama_client import OllamaClient
 from .gemini_client import GeminiClient
 from .rag_service import RAGService
+from .story_memory import StoryMemoryService
 
 __all__ = [
     "DatabaseService",
@@ -10,4 +11,5 @@ __all__ = [
     "OllamaClient",
     "GeminiClient",
     "RAGService",
+    "StoryMemoryService",
 ]

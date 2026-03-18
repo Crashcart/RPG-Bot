@@ -10,6 +10,10 @@ from .payloads import (
     PipelineResult,
     CommandType,
     ActionOutcome,
+    StoryFact,
+    StoryEntityType,
+    ExtractedFact,
+    ExtractionResult,
 )
 
 __all__ = [
@@ -24,4 +28,8 @@ __all__ = [
     "PipelineResult",
     "CommandType",
     "ActionOutcome",
+    "StoryFact",
+    "StoryEntityType",
+    "ExtractedFact",
+    "ExtractionResult",
 ]
