@@ -1,0 +1,2 @@
+asyncpg==0.30.0
+redis[asyncio]==5.2.1

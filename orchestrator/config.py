@@ -1,0 +1,63 @@
+"""Ironclad GM – Centralised configuration loaded from environment variables."""
+
+from __future__ import annotations
+
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    # ── PostgreSQL ────────────────────────────────────────────────────────────
+    postgres_db:       str = "ironclad"
+    postgres_user:     str = "ironclad"
+    postgres_password: str
+    db_host:           str = "ironclad-db"
+    db_port:           int = 5432
+
+    @property
+    def database_url(self) -> str:
+        return (
+            f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.db_host}:{self.db_port}/{self.postgres_db}"
+        )
+
+    @property
+    def database_dsn(self) -> str:
+        """asyncpg-native DSN (no driver prefix)."""
+        return (
+            f"postgresql://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.db_host}:{self.db_port}/{self.postgres_db}"
+        )
+
+    # ── Redis ─────────────────────────────────────────────────────────────────
+    redis_host:     str = "ironclad-cache"
+    redis_port:     int = 6379
+    redis_password: str
+    session_ttl_seconds: int = 3600
+
+    # ── Ollama ────────────────────────────────────────────────────────────────
+    ollama_host:  str = "http://ironclad-ollama:11434"
+    ollama_model: str = "mistral:7b-instruct"
+    ollama_timeout_seconds: int = 60
+
+    # ── Gemini API ────────────────────────────────────────────────────────────
+    gemini_api_key: str
+    gemini_model:   str = "gemini-1.5-pro"
+
+    # ── ChromaDB ──────────────────────────────────────────────────────────────
+    chroma_host: str = "ironclad-chroma"
+    chroma_port: int = 8000
+
+    # ── Media Proxy ───────────────────────────────────────────────────────────
+    media_proxy_url: str = "http://media-asset-proxy:8001"
+
+    # ── App ───────────────────────────────────────────────────────────────────
+    log_level: str = "INFO"
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()
