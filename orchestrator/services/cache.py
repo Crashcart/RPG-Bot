@@ -97,3 +97,19 @@ class CacheService:
 
     async def get_cached_narrative(self, intent_id: str) -> str | None:
         return await self.client.get(f"narrative:{intent_id}")
+
+    # ── PDF Ingestion Job Progress ────────────────────────────────────────────
+
+    async def set_job_progress(
+        self, job_id: str, data: dict, ttl: int = 7200
+    ) -> None:
+        """Write a progress snapshot for a background PDF ingestion job."""
+        await self.client.setex(
+            f"pdf_job:{job_id}", ttl, json.dumps(data)
+        )
+
+    async def get_job_progress(self, job_id: str) -> dict | None:
+        raw = await self.client.get(f"pdf_job:{job_id}")
+        if not raw:
+            return None
+        return json.loads(raw)

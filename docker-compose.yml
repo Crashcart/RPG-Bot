@@ -20,6 +20,7 @@ volumes:
   ollama-models:
   csv-exports:
   media-assets:
+  pdf-uploads:
 
 services:
 
@@ -42,6 +43,7 @@ services:
       - OLLAMA_HOST=http://ironclad-ollama:11434
       - CHROMA_HOST=ironclad-chroma
       - MEDIA_PROXY_URL=http://media-asset-proxy:8001
+      - PDF_UPLOAD_DIR=/app/pdf_uploads
     depends_on:
       ironclad-db:
         condition: service_healthy
@@ -53,6 +55,7 @@ services:
         condition: service_started
     volumes:
       - csv-exports:/app/exports
+      - pdf-uploads:/app/pdf_uploads
 
   # ── Discord Bot Listener ────────────────────────────────────────────────────
   ironclad-discord:

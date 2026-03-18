@@ -37,6 +37,7 @@ from orchestrator.services import (
     RAGService,
     StoryMemoryService,
 )
+from orchestrator.services.pdf_processor import PDFProcessorService
 
 # ─────────────────────────────────────────────────────────────────────────────
 settings = get_settings()
@@ -44,12 +45,18 @@ logging.basicConfig(level=settings.log_level)
 logger = logging.getLogger(__name__)
 
 # Shared service instances (initialised in lifespan)
-db           = DatabaseService(settings)
-cache        = CacheService(settings)
-rag          = RAGService(settings)
-ollama       = OllamaClient(settings)
-gemini       = GeminiClient(settings)
-story_memory = StoryMemoryService(settings)
+db            = DatabaseService(settings)
+cache         = CacheService(settings)
+rag           = RAGService(settings)
+ollama        = OllamaClient(settings)
+gemini        = GeminiClient(settings)
+story_memory  = StoryMemoryService(settings)
+pdf_processor = PDFProcessorService(
+    gemini_api_key=settings.gemini_api_key,
+    gemini_model=settings.gemini_model,
+    chroma_host=settings.chroma_host,
+    chroma_port=settings.chroma_port,
+)
 
 # Pipeline phase singletons
 ingestion    = IngestionPhase(db, rag)
@@ -93,8 +100,10 @@ app.add_middleware(
 
 # ── Web UI setup ──────────────────────────────────────────────────────────────
 _templates_dir = Path(__file__).parent / "templates"
-app.state.templates = Jinja2Templates(directory=str(_templates_dir))
-app.state.db = db
+app.state.templates    = Jinja2Templates(directory=str(_templates_dir))
+app.state.db           = db
+app.state.cache        = cache
+app.state.pdf_processor = pdf_processor
 
 app.include_router(web_router, prefix="/web")
 

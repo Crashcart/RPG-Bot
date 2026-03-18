@@ -18,23 +18,33 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
-from datetime import datetime, timezone
+from pathlib import Path
 
-from fastapi import APIRouter, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import APIRouter, BackgroundTasks, File, Form, Request, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Templates are loaded by main.py and injected via app.state
+_PDF_UPLOAD_DIR = Path(os.environ.get("PDF_UPLOAD_DIR", "/app/pdf_uploads"))
+_PDF_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+_MAX_PDF_MB = 200  # reject uploads over this size
+
+
 def _tmpl(request: Request) -> Jinja2Templates:
     return request.app.state.templates
 
-
 def _db(request: Request):
     return request.app.state.db
+
+def _cache(request: Request):
+    return request.app.state.cache
+
+def _pdf_processor(request: Request):
+    return request.app.state.pdf_processor
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -156,3 +166,75 @@ async def log_page(request: Request, campaign_id: str = "", outcome_filter: str 
         "selected_campaign": campaign_id,
         "outcome_filter":    outcome_filter,
     })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PDF Upload & Ingestion
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/rules/upload-pdf", response_class=RedirectResponse)
+async def upload_pdf(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    campaign_id:  str        = Form(...),
+    module_name:  str        = Form(...),
+    pdf_file:     UploadFile = File(...),
+):
+    """
+    Accept a PDF upload, save it to the uploads directory, and kick off a
+    background ingestion job.  Redirects immediately to the rules page so the
+    browser stays responsive; the client polls /web/rules/pdf-status/<job_id>
+    for live progress.
+    """
+    if not pdf_file.filename or not pdf_file.filename.lower().endswith(".pdf"):
+        request.session["flash_err"] = "Only PDF files are accepted."
+        return RedirectResponse(f"/web/rules?campaign_id={campaign_id}", status_code=303)
+
+    # Size guard — read first chunk to check content-length header
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > _MAX_PDF_MB * 1024 * 1024:
+        request.session["flash_err"] = f"PDF exceeds the {_MAX_PDF_MB} MB limit."
+        return RedirectResponse(f"/web/rules?campaign_id={campaign_id}", status_code=303)
+
+    # Save to disk
+    job_id   = str(uuid.uuid4())
+    pdf_path = _PDF_UPLOAD_DIR / f"{job_id}.pdf"
+    try:
+        contents = await pdf_file.read()
+        pdf_path.write_bytes(contents)
+    except Exception as exc:
+        request.session["flash_err"] = f"Upload failed: {exc}"
+        return RedirectResponse(f"/web/rules?campaign_id={campaign_id}", status_code=303)
+
+    # Fire background task — returns immediately
+    processor = _pdf_processor(request)
+    cache     = _cache(request)
+    db        = _db(request)
+
+    background_tasks.add_task(
+        processor.ingest_pdf,
+        pdf_path=pdf_path,
+        campaign_id=campaign_id,
+        module_name=module_name,
+        job_id=job_id,
+        db=db,
+        cache=cache,
+    )
+
+    request.session["flash_ok"] = (
+        f"'{module_name}' is being ingested in the background. "
+        f"Job ID: {job_id[:8]}…"
+    )
+    return RedirectResponse(
+        f"/web/rules?campaign_id={campaign_id}&job_id={job_id}", status_code=303
+    )
+
+
+@router.get("/rules/pdf-status/{job_id}", response_class=JSONResponse)
+async def pdf_status(request: Request, job_id: str):
+    """Polled by the browser every 2 s to show ingestion progress."""
+    cache    = _cache(request)
+    progress = await cache.get_job_progress(job_id)
+    if not progress:
+        return JSONResponse({"status": "unknown"}, status_code=404)
+    return JSONResponse(progress)
