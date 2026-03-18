@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+{% block title %}Rules{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1><span>📖</span> Rule Registry</h1>
+  <p>Manage which rulebook modules the mechanical engine can reference during adjudication.</p>
+</div>
+
+<!-- Campaign selector -->
+<div class="filter-bar">
+  <form method="get" style="display:flex;gap:8px;align-items:center">
+    <label style="margin:0;white-space:nowrap">Campaign:</label>
+    <select name="campaign_id" onchange="this.form.submit()">
+      <option value="">— select —</option>
+      {% for c in campaigns %}
+      <option value="{{ c.id }}" {% if c.id == selected_campaign %}selected{% endif %}>
+        {{ c.name }} ({{ c.system }})
+      </option>
+      {% endfor %}
+    </select>
+  </form>
+</div>
+
+{% if selected_campaign %}
+
+<!-- Active rule modules table -->
+<div class="card">
+  <div class="card-header">
+    <span class="card-title">Loaded Modules</span>
+    <span class="text-muted" style="font-size:12px">{{ modules|length }} module{{ 's' if modules|length != 1 }}</span>
+  </div>
+  {% if modules %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Active</th>
+          <th>Module Name</th>
+          <th>Type</th>
+          <th>Collection / Keys</th>
+          <th>Loaded</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for m in modules %}
+        <tr>
+          <td>
+            <!-- Toggle active/inactive via fetch -->
+            <label class="toggle" title="{{ 'Deactivate' if m.active else 'Activate' }}">
+              <input type="checkbox" {% if m.active %}checked{% endif %}
+                     onchange="toggleModule('{{ m.id }}', this)">
+              <div class="toggle-track"></div>
+              <div class="toggle-thumb"></div>
+            </label>
+          </td>
+          <td style="font-weight:600">{{ m.module_name }}</td>
+          <td><span class="badge badge-{{ m.module_type }}">{{ m.module_type }}</span></td>
+          <td class="mono text-muted">
+            {% if m.module_type == 'vector' %}
+              {{ m.chroma_collection or '—' }}
+            {% else %}
+              {{ m.module_data | length }} keys
+            {% endif %}
+          </td>
+          <td class="mono text-muted">{{ m.loaded_at }}</td>
+          <td>
+            <form method="post" action="/web/rules/delete/{{ m.id }}?campaign_id={{ selected_campaign }}"
+                  onsubmit="return confirm('Remove {{ m.module_name }}?')">
+              <button type="submit" class="btn btn-danger btn-sm">Remove</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty"><div class="empty-icon">📚</div><p>No rule modules loaded for this campaign.</p></div>
+  {% endif %}
+</div>
+
+<!-- Upload new module -->
+<div class="divider-label">Add Rule Module</div>
+
+<div class="card">
+  <div class="card-header"><span class="card-title">Upload JSON Rulebook</span></div>
+  <div class="card-body">
+    <form method="post" action="/web/rules/upload">
+      <input type="hidden" name="campaign_id" value="{{ selected_campaign }}">
+      <div class="row">
+        <div class="form-row">
+          <label>Module Name</label>
+          <input type="text" name="module_name" placeholder="e.g. D&D 5e Combat Rules" required>
+        </div>
+        <div class="form-row" style="max-width:160px">
+          <label>Type</label>
+          <select name="module_type">
+            <option value="json">JSON</option>
+            <option value="vector">Vector (collection name)</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <label id="data-label">Rule Data (JSON)</label>
+        <textarea name="module_data" id="module-data" rows="8"
+          placeholder='{"rules": {"attack_roll": "1d20 + attack bonus vs AC", "critical_hit": "roll 20 = double damage dice"}}'></textarea>
+      </div>
+      <div class="form-row" id="collection-row" style="display:none">
+        <label>ChromaDB Collection Name</label>
+        <input type="text" name="chroma_collection" id="chroma-collection"
+               placeholder="e.g. dnd5e_phb_chunks">
+      </div>
+      <button type="submit" class="btn btn-gold">Load Module</button>
+    </form>
+  </div>
+</div>
+
+{% else %}
+<div class="empty"><div class="empty-icon">⚔</div><p>Select a campaign to manage its rule modules.</p></div>
+{% endif %}
+
+<script>
+  // Show/hide ChromaDB collection field based on type selection
+  const typeSelect = document.querySelector('select[name="module_type"]');
+  const collectionRow = document.getElementById('collection-row');
+  const moduleDataRow = document.querySelector('textarea[name="module_data"]')?.closest('.form-row');
+  const dataLabel = document.getElementById('data-label');
+  if (typeSelect) {
+    typeSelect.addEventListener('change', () => {
+      const isVector = typeSelect.value === 'vector';
+      collectionRow.style.display = isVector ? '' : 'none';
+      if (moduleDataRow) moduleDataRow.style.display = isVector ? 'none' : '';
+      if (dataLabel) dataLabel.textContent = isVector ? '' : 'Rule Data (JSON)';
+    });
+  }
+
+  // Toggle active state without full page reload
+  function toggleModule(moduleId, checkbox) {
+    const campaignId = new URLSearchParams(location.search).get('campaign_id') || '';
+    fetch(`/web/rules/toggle/${moduleId}?campaign_id=${campaignId}`, { method: 'POST' })
+      .then(r => { if (!r.ok) { checkbox.checked = !checkbox.checked; } });
+  }
+</script>
+
+{% endblock %}

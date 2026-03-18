@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Lore{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1><span>🌍</span> World Lore & Story Memory</h1>
+  <p>Every established fact the GM uses to maintain continuity. Read-only — updated automatically after each action.</p>
+</div>
+
+<!-- Filters -->
+<div class="filter-bar">
+  <form method="get" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <label style="margin:0;white-space:nowrap">Campaign:</label>
+    <select name="campaign_id" onchange="this.form.submit()">
+      <option value="">— select —</option>
+      {% for c in campaigns %}
+      <option value="{{ c.id }}" {% if c.id == selected_campaign %}selected{% endif %}>
+        {{ c.name }}
+      </option>
+      {% endfor %}
+    </select>
+    {% if selected_campaign %}
+    <label style="margin:0 0 0 8px;white-space:nowrap">Filter:</label>
+    <select name="entity_type" onchange="this.form.submit()">
+      <option value="">All Types</option>
+      <option value="npc"        {% if entity_type == 'npc' %}selected{% endif %}>NPC</option>
+      <option value="location"   {% if entity_type == 'location' %}selected{% endif %}>Location</option>
+      <option value="event"      {% if entity_type == 'event' %}selected{% endif %}>Event</option>
+      <option value="world_fact" {% if entity_type == 'world_fact' %}selected{% endif %}>World Fact</option>
+      <option value="plot_thread"{% if entity_type == 'plot_thread' %}selected{% endif %}>Plot Thread</option>
+    </select>
+    {% endif %}
+  </form>
+  {% if selected_campaign %}
+  <span class="text-muted" style="font-size:12px;margin-left:auto">{{ facts|length }} fact{{ 's' if facts|length != 1 }}</span>
+  {% endif %}
+</div>
+
+{% if selected_campaign %}
+
+{% if facts %}
+
+<!-- Group by entity type for visual clarity -->
+{% set types_present = facts | map(attribute='entity_type') | unique | list %}
+
+{% for etype in ['npc', 'location', 'plot_thread', 'event', 'world_fact'] %}
+  {% set group = facts | selectattr('entity_type', 'equalto', etype) | list %}
+  {% if group %}
+  <div class="divider-label">{{ etype | replace('_', ' ') | upper }}</div>
+  <div class="card">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Entity</th><th>Summary</th><th>Detail</th><th>Last Updated</th></tr>
+        </thead>
+        <tbody>
+          {% for f in group %}
+          <tr>
+            <td style="font-weight:600;white-space:nowrap;color:var(--gold)">{{ f.entity_name }}</td>
+            <td style="max-width:300px">{{ f.summary }}</td>
+            <td style="max-width:280px">
+              {% if f.detail %}
+              <details>
+                <summary class="expand-btn">Show detail ›</summary>
+                <div class="narrative-preview" style="margin-top:6px">{{ f.detail }}</div>
+              </details>
+              {% else %}
+              <span class="text-muted">—</span>
+              {% endif %}
+            </td>
+            <td class="mono text-muted" style="white-space:nowrap">{{ f.last_updated_at }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+{% endfor %}
+
+{% else %}
+<div class="empty">
+  <div class="empty-icon">📜</div>
+  <p>No lore established yet.<br>Facts are extracted automatically after each narrated action.</p>
+</div>
+{% endif %}
+
+{% else %}
+<div class="empty"><div class="empty-icon">🗺</div><p>Select a campaign to browse its lore.</p></div>
+{% endif %}
+
+{% endblock %}

@@ -55,7 +55,8 @@ class Settings(BaseSettings):
     media_proxy_url: str = "http://media-asset-proxy:8001"
 
     # ── App ───────────────────────────────────────────────────────────────────
-    log_level: str = "INFO"
+    log_level:          str = "INFO"
+    session_secret_key: str = "change-me-to-a-long-random-string"
 
 
 @lru_cache(maxsize=1)

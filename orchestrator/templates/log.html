@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}Action Log{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1><span>📜</span> Action Log</h1>
+  <p>Immutable record of every player action, mechanical resolution, and narrative generated.</p>
+</div>
+
+<div class="filter-bar">
+  <form method="get" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <label style="margin:0;white-space:nowrap">Campaign:</label>
+    <select name="campaign_id" onchange="this.form.submit()">
+      <option value="">— select —</option>
+      {% for c in campaigns %}
+      <option value="{{ c.id }}" {% if c.id == selected_campaign %}selected{% endif %}>{{ c.name }}</option>
+      {% endfor %}
+    </select>
+    {% if selected_campaign %}
+    <label style="margin:0 0 0 8px;white-space:nowrap">Outcome:</label>
+    <select name="outcome_filter" onchange="this.form.submit()">
+      <option value="">All</option>
+      <option value="success"          {% if outcome_filter == 'success' %}selected{% endif %}>Success</option>
+      <option value="critical_success" {% if outcome_filter == 'critical_success' %}selected{% endif %}>Critical Success</option>
+      <option value="partial_success"  {% if outcome_filter == 'partial_success' %}selected{% endif %}>Partial</option>
+      <option value="failure"          {% if outcome_filter == 'failure' %}selected{% endif %}>Failure</option>
+      <option value="critical_failure" {% if outcome_filter == 'critical_failure' %}selected{% endif %}>Critical Failure</option>
+    </select>
+    {% endif %}
+  </form>
+  {% if selected_campaign %}
+  <span class="text-muted" style="font-size:12px;margin-left:auto">Showing {{ entries|length }} entries</span>
+  {% endif %}
+</div>
+
+{% if selected_campaign %}
+{% if entries %}
+
+<div class="card" style="padding:0">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Player</th>
+          <th>Action</th>
+          <th>Roll</th>
+          <th>Outcome</th>
+          <th>Narrative</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in entries %}
+        <tr>
+          <td class="mono text-muted" style="white-space:nowrap;font-size:11px">{{ e.resolved_at }}</td>
+          <td class="mono" style="font-size:11px">{{ e.player_id[:14] }}…</td>
+          <td style="max-width:240px;font-size:13px">{{ e.raw_input[:100] }}{% if e.raw_input|length > 100 %}…{% endif %}</td>
+          <td class="mono text-gold" style="white-space:nowrap">
+            {% if e.roll_result %}{{ e.roll_result }} / {{ e.difficulty }}{% else %}—{% endif %}
+          </td>
+          <td style="white-space:nowrap">
+            {% set o = e.outcome or '' %}
+            {% if 'critical_success' in o %}
+              <span class="badge badge-critical">Crit ✓</span>
+            {% elif 'success' in o %}
+              <span class="badge badge-success">Success</span>
+            {% elif 'partial' in o %}
+              <span class="badge badge-partial">Partial</span>
+            {% elif 'critical_failure' in o %}
+              <span class="badge badge-failure">Crit ✗</span>
+            {% elif 'failure' in o %}
+              <span class="badge badge-failure">Failure</span>
+            {% else %}
+              <span class="text-muted">—</span>
+            {% endif %}
+          </td>
+          <td style="max-width:300px">
+            {% if e.narrative_summary %}
+            <details>
+              <summary class="expand-btn">Read narrative ›</summary>
+              <div class="narrative-preview">{{ e.narrative_summary }}</div>
+            </details>
+            {% else %}
+            <span class="text-muted">—</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% else %}
+<div class="empty"><div class="empty-icon">⚔</div><p>No actions recorded for this campaign yet.</p></div>
+{% endif %}
+{% else %}
+<div class="empty"><div class="empty-icon">📜</div><p>Select a campaign to view its action log.</p></div>
+{% endif %}
+
+{% endblock %}

@@ -13,9 +13,12 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.sessions import SessionMiddleware
+from fastapi.templating import Jinja2Templates
 
 from orchestrator.config import get_settings
 from orchestrator.pipeline import (
@@ -24,6 +27,7 @@ from orchestrator.pipeline import (
     NarrationPhase,
     StateCommitPhase,
 )
+from orchestrator.routers import web_router
 from orchestrator.schemas.payloads import IntentPayload, NarrativeResponsePayload, PipelineResult
 from orchestrator.services import (
     CacheService,
@@ -78,9 +82,21 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # tighten in production
-    allow_methods=["POST", "GET"],
+    allow_methods=["POST", "GET", "PATCH", "DELETE"],
     allow_headers=["*"],
 )
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.session_secret_key,
+    max_age=3600,
+)
+
+# ── Web UI setup ──────────────────────────────────────────────────────────────
+_templates_dir = Path(__file__).parent / "templates"
+app.state.templates = Jinja2Templates(directory=str(_templates_dir))
+app.state.db = db
+
+app.include_router(web_router, prefix="/web")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

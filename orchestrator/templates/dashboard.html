@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1><span>🏰</span> Campaign Dashboard</h1>
+  <p>System overview — active campaigns, world state, recent actions.</p>
+</div>
+
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-value">{{ stats.campaigns }}</div>
+    <div class="stat-label">Campaigns</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value">{{ stats.living }}</div>
+    <div class="stat-label">Living Characters</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value">{{ stats.dead }}</div>
+    <div class="stat-label">Fallen</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value">{{ stats.rule_modules }}</div>
+    <div class="stat-label">Rule Modules</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value">{{ stats.story_facts }}</div>
+    <div class="stat-label">Story Facts</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value">{{ stats.actions_today }}</div>
+    <div class="stat-label">Actions Today</div>
+  </div>
+</div>
+
+<!-- Active Campaigns -->
+<div class="card">
+  <div class="card-header">
+    <span class="card-title">Active Campaigns</span>
+  </div>
+  {% if campaigns %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>System</th>
+          <th>Guild</th>
+          <th>Characters</th>
+          <th>Story Facts</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in campaigns %}
+        <tr>
+          <td class="text-gold" style="font-weight:600">{{ c.name }}</td>
+          <td><span class="mono">{{ c.system }}</span></td>
+          <td><span class="mono text-muted">{{ c.guild_id }}</span></td>
+          <td>{{ c.character_count }}</td>
+          <td>{{ c.fact_count }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty"><div class="empty-icon">🗺</div><p>No campaigns yet.</p></div>
+  {% endif %}
+</div>
+
+<!-- Recent Actions -->
+<div class="card">
+  <div class="card-header">
+    <span class="card-title">Recent Actions</span>
+    <a href="/web/log" class="btn btn-ghost btn-sm">View all →</a>
+  </div>
+  {% if recent_actions %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Time</th><th>Player</th><th>Action</th><th>Outcome</th></tr>
+      </thead>
+      <tbody>
+        {% for a in recent_actions %}
+        <tr>
+          <td class="mono text-muted">{{ a.resolved_at }}</td>
+          <td class="mono">{{ a.player_id[:10] }}…</td>
+          <td style="max-width:340px">
+            <details>
+              <summary class="expand-btn">{{ a.raw_input[:80] }}{% if a.raw_input|length > 80 %}…{% endif %}</summary>
+              {% if a.narrative_summary %}
+              <div class="narrative-preview">{{ a.narrative_summary }}</div>
+              {% endif %}
+            </details>
+          </td>
+          <td>
+            {% set o = a.outcome %}
+            {% if 'critical_success' in o %}
+              <span class="badge badge-critical">Crit ✓</span>
+            {% elif 'success' in o %}
+              <span class="badge badge-success">Success</span>
+            {% elif 'partial' in o %}
+              <span class="badge badge-partial">Partial</span>
+            {% elif 'critical_failure' in o %}
+              <span class="badge badge-failure">Crit ✗</span>
+            {% else %}
+              <span class="badge badge-failure">Failure</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty"><div class="empty-icon">📜</div><p>No actions recorded yet.</p></div>
+  {% endif %}
+</div>
+
+{% endblock %}

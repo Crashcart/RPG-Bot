@@ -183,6 +183,213 @@ class DatabaseService:
             record.get("narrative_summary", "")[:500],
         )
 
+    # ── Web UI Queries ────────────────────────────────────────────────────────
+
+    async def get_all_campaigns(self) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            """
+            SELECT c.id, c.name, c.system, c.guild_id,
+                   COUNT(DISTINCT ch.id) FILTER (WHERE ch.status = 'ALIVE') AS character_count,
+                   COUNT(DISTINCT sc.id) AS fact_count
+            FROM campaigns c
+            LEFT JOIN characters ch ON ch.campaign_id = c.id
+            LEFT JOIN story_context sc ON sc.campaign_id = c.id
+            WHERE c.active = TRUE
+            GROUP BY c.id
+            ORDER BY c.created_at DESC
+            """
+        )
+        return [
+            {
+                "id":              str(r["id"]),
+                "name":            r["name"],
+                "system":          r["system"],
+                "guild_id":        r["guild_id"],
+                "character_count": r["character_count"],
+                "fact_count":      r["fact_count"],
+            }
+            for r in rows
+        ]
+
+    async def get_dashboard_stats(self) -> dict[str, Any]:
+        row = await self.pool.fetchrow(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM campaigns WHERE active = TRUE)              AS campaigns,
+                (SELECT COUNT(*) FROM characters WHERE status = 'ALIVE')         AS living,
+                (SELECT COUNT(*) FROM characters WHERE status = 'DEAD')          AS dead,
+                (SELECT COUNT(*) FROM rule_registry WHERE active = TRUE)         AS rule_modules,
+                (SELECT COUNT(*) FROM story_context)                             AS story_facts,
+                (SELECT COUNT(*) FROM action_log
+                 WHERE resolved_at > NOW() - INTERVAL '1 day')                   AS actions_today
+            """
+        )
+        return dict(row)
+
+    async def get_recent_actions(self, limit: int = 8) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            """
+            SELECT player_id, raw_input, narrative_summary, resolved_at,
+                   mechanical_payload->>'outcome' AS outcome
+            FROM action_log
+            ORDER BY resolved_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+        return [
+            {
+                "player_id":        r["player_id"],
+                "raw_input":        r["raw_input"],
+                "narrative_summary": r["narrative_summary"] or "",
+                "resolved_at":      r["resolved_at"].strftime("%m-%d %H:%M") if r["resolved_at"] else "",
+                "outcome":          r["outcome"] or "",
+            }
+            for r in rows
+        ]
+
+    async def get_all_rule_modules(self, campaign_id: str) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            """
+            SELECT id, module_name, module_type, chroma_collection,
+                   module_data, active, loaded_at
+            FROM rule_registry
+            WHERE campaign_id = $1
+            ORDER BY loaded_at DESC
+            """,
+            UUID(campaign_id),
+        )
+        return [
+            {
+                "id":               str(r["id"]),
+                "module_name":      r["module_name"],
+                "module_type":      r["module_type"],
+                "chroma_collection": r["chroma_collection"] or "",
+                "module_data":      json.loads(r["module_data"]) if isinstance(r["module_data"], str) else dict(r["module_data"]),
+                "active":           r["active"],
+                "loaded_at":        r["loaded_at"].strftime("%Y-%m-%d %H:%M") if r["loaded_at"] else "",
+            }
+            for r in rows
+        ]
+
+    async def add_rule_module(
+        self,
+        campaign_id: str,
+        module_name: str,
+        module_type: str,
+        module_data: dict,
+        chroma_collection: str | None = None,
+    ) -> None:
+        await self.pool.execute(
+            """
+            INSERT INTO rule_registry
+                (campaign_id, module_name, module_type, module_data, chroma_collection, active)
+            VALUES ($1, $2, $3, $4, $5, TRUE)
+            ON CONFLICT (campaign_id, module_name) DO UPDATE
+                SET module_data       = EXCLUDED.module_data,
+                    module_type       = EXCLUDED.module_type,
+                    chroma_collection = EXCLUDED.chroma_collection,
+                    active            = TRUE,
+                    loaded_at         = NOW()
+            """,
+            UUID(campaign_id),
+            module_name,
+            module_type,
+            json.dumps(module_data),
+            chroma_collection,
+        )
+
+    async def toggle_rule_module(self, module_id: str) -> None:
+        await self.pool.execute(
+            "UPDATE rule_registry SET active = NOT active WHERE id = $1",
+            UUID(module_id),
+        )
+
+    async def delete_rule_module(self, module_id: str) -> None:
+        await self.pool.execute(
+            "DELETE FROM rule_registry WHERE id = $1",
+            UUID(module_id),
+        )
+
+    async def get_story_context(
+        self, campaign_id: str, entity_type: str = ""
+    ) -> list[dict[str, Any]]:
+        if entity_type:
+            rows = await self.pool.fetch(
+                """
+                SELECT entity_type, entity_name, summary, detail, last_updated_at
+                FROM story_context
+                WHERE campaign_id = $1 AND entity_type = $2
+                ORDER BY entity_type, entity_name
+                """,
+                UUID(campaign_id), entity_type,
+            )
+        else:
+            rows = await self.pool.fetch(
+                """
+                SELECT entity_type, entity_name, summary, detail, last_updated_at
+                FROM story_context
+                WHERE campaign_id = $1
+                ORDER BY entity_type, entity_name
+                """,
+                UUID(campaign_id),
+            )
+        return [
+            {
+                "entity_type":    r["entity_type"],
+                "entity_name":    r["entity_name"],
+                "summary":        r["summary"],
+                "detail":         r["detail"] or "",
+                "last_updated_at": r["last_updated_at"].strftime("%Y-%m-%d %H:%M") if r["last_updated_at"] else "",
+            }
+            for r in rows
+        ]
+
+    async def get_action_log(
+        self, campaign_id: str, outcome_filter: str = "", limit: int = 50
+    ) -> list[dict[str, Any]]:
+        if outcome_filter:
+            rows = await self.pool.fetch(
+                """
+                SELECT player_id, raw_input, narrative_summary, resolved_at,
+                       mechanical_payload->>'outcome' AS outcome,
+                       mechanical_payload->>'roll_result' AS roll_result,
+                       mechanical_payload->>'difficulty' AS difficulty
+                FROM action_log
+                WHERE campaign_id = $1
+                  AND mechanical_payload->>'outcome' = $2
+                ORDER BY resolved_at DESC
+                LIMIT $3
+                """,
+                UUID(campaign_id), outcome_filter, limit,
+            )
+        else:
+            rows = await self.pool.fetch(
+                """
+                SELECT player_id, raw_input, narrative_summary, resolved_at,
+                       mechanical_payload->>'outcome' AS outcome,
+                       mechanical_payload->>'roll_result' AS roll_result,
+                       mechanical_payload->>'difficulty' AS difficulty
+                FROM action_log
+                WHERE campaign_id = $1
+                ORDER BY resolved_at DESC
+                LIMIT $2
+                """,
+                UUID(campaign_id), limit,
+            )
+        return [
+            {
+                "player_id":        r["player_id"],
+                "raw_input":        r["raw_input"],
+                "narrative_summary": r["narrative_summary"] or "",
+                "resolved_at":      r["resolved_at"].strftime("%Y-%m-%d %H:%M:%S") if r["resolved_at"] else "",
+                "outcome":          r["outcome"] or "",
+                "roll_result":      r["roll_result"] or "",
+                "difficulty":       r["difficulty"] or "",
+            }
+            for r in rows
+        ]
+
     # ── Rule Registry ─────────────────────────────────────────────────────────
 
     async def get_active_rule_modules(self, campaign_id: str) -> list[dict[str, Any]]:
