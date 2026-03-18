@@ -11,11 +11,12 @@ FastAPI application that drives the four-phase pipeline:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.sessions import SessionMiddleware
 from fastapi.templating import Jinja2Templates
@@ -218,6 +219,69 @@ async def create_session(
         character_id=character_id,
     )
     return {"status": "ok", "session_token": session_token}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rulebook API  (called by the Discord bot — JSON only, no sessions/redirects)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_pdf_upload_dir = Path(os.environ.get("PDF_UPLOAD_DIR", "/app/pdf_uploads"))
+_pdf_upload_dir.mkdir(parents=True, exist_ok=True)
+_MAX_PDF_BYTES = 200 * 1024 * 1024  # 200 MB
+
+
+@app.post("/api/rulebook/ingest", summary="Ingest a PDF rulebook (bot API)")
+async def api_ingest_rulebook(
+    background_tasks: BackgroundTasks,
+    campaign_id: str        = Form(...),
+    module_name: str        = Form(...),
+    pdf_file:    UploadFile = File(...),
+) -> dict:
+    """
+    Accepts a multipart PDF upload from the Discord bot (or any HTTP client).
+    Saves the file, starts a background ingestion job, and returns the job ID
+    immediately so the caller can poll /api/rulebook/status/{job_id}.
+    """
+    if not pdf_file.filename or not pdf_file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
+
+    contents = await pdf_file.read()
+    if len(contents) > _MAX_PDF_BYTES:
+        raise HTTPException(status_code=413, detail="PDF exceeds the 200 MB limit.")
+
+    import uuid as _uuid
+    job_id   = str(_uuid.uuid4())
+    pdf_path = _pdf_upload_dir / f"{job_id}.pdf"
+    pdf_path.write_bytes(contents)
+
+    background_tasks.add_task(
+        pdf_processor.ingest_pdf,
+        pdf_path=pdf_path,
+        campaign_id=campaign_id,
+        module_name=module_name,
+        job_id=job_id,
+        db=db,
+        cache=cache,
+    )
+
+    logger.info("Bot-initiated PDF ingestion queued: job=%s module=%s", job_id, module_name)
+    return {"job_id": job_id, "status": "queued", "module_name": module_name}
+
+
+@app.get("/api/rulebook/status/{job_id}", summary="Poll PDF ingestion progress (bot API)")
+async def api_rulebook_status(job_id: str) -> dict:
+    progress = await cache.get_job_progress(job_id)
+    if not progress:
+        raise HTTPException(status_code=404, detail="Job not found or expired.")
+    return progress
+
+
+@app.get("/api/campaign/active", summary="Get the active campaign for a guild (bot API)")
+async def api_active_campaign(guild_id: str) -> dict:
+    campaign = await db.get_active_campaign(guild_id)
+    if not campaign:
+        raise HTTPException(status_code=404, detail=f"No active campaign for guild {guild_id}.")
+    return campaign
 
 
 # ─────────────────────────────────────────────────────────────────────────────
