@@ -5,13 +5,19 @@ Serves HTML pages (Jinja2) for the browser-based rule management panel.
 All routes are under /web/.  JSON API endpoints are under /api/.
 
 Pages:
-  GET  /web/              – Campaign dashboard
-  GET  /web/rules         – Rule registry browser + upload form
-  POST /web/rules/upload  – Load a new JSON rule module
-  POST /web/rules/toggle/{id} – Toggle a module active/inactive
-  POST /web/rules/delete/{id} – Remove a module
-  GET  /web/lore          – Story memory / world facts browser
-  GET  /web/log           – Action log browser
+  GET  /web/                    – Campaign dashboard
+  GET  /web/rules               – Rule registry browser + upload form
+  POST /web/rules/upload        – Load a new JSON rule module
+  POST /web/rules/toggle/{id}   – Toggle a module active/inactive
+  POST /web/rules/delete/{id}   – Remove a module
+  GET  /web/lore                – Story memory / world facts browser (read)
+  POST /web/lore/upsert         – Add or edit a story fact (write)
+  POST /web/lore/delete         – Delete a story fact
+  GET  /web/log                 – Action log browser
+  GET  /web/nodes               – AI node registry / Connection Dashboard
+  POST /web/nodes/add           – Add or update an Ollama/Gemini node
+  POST /web/nodes/toggle/{id}   – Enable / disable a node
+  POST /web/nodes/delete/{id}   – Remove a node from the registry
 """
 
 from __future__ import annotations
@@ -131,7 +137,7 @@ async def delete_rule_module(request: Request, module_id: str, campaign_id: str 
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Lore Browser
+# Lore Browser – read + CRUD
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/lore", response_class=HTMLResponse)
@@ -147,6 +153,115 @@ async def lore_page(request: Request, campaign_id: str = "", entity_type: str = 
         "selected_campaign": campaign_id,
         "entity_type":       entity_type,
     })
+
+
+@router.post("/lore/upsert", response_class=RedirectResponse)
+async def lore_upsert(
+    request: Request,
+    campaign_id: str = Form(...),
+    entity_type: str = Form(...),
+    entity_name: str = Form(...),
+    summary:     str = Form(...),
+    detail:      str = Form(""),
+):
+    db = _db(request)
+    try:
+        await db.upsert_story_fact(
+            campaign_id=campaign_id,
+            entity_type=entity_type,
+            entity_name=entity_name.strip(),
+            summary=summary.strip(),
+            detail=detail.strip(),
+        )
+        request.session["flash_ok"] = f"Fact '{entity_name}' saved."
+    except Exception as exc:
+        request.session["flash_err"] = str(exc)
+    return RedirectResponse(
+        f"/web/lore?campaign_id={campaign_id}&entity_type={entity_type}", status_code=303
+    )
+
+
+@router.post("/lore/delete", response_class=RedirectResponse)
+async def lore_delete(
+    request: Request,
+    campaign_id: str = Form(...),
+    entity_type: str = Form(...),
+    entity_name: str = Form(...),
+):
+    db = _db(request)
+    try:
+        await db.delete_story_fact(
+            campaign_id=campaign_id,
+            entity_type=entity_type,
+            entity_name=entity_name,
+        )
+        request.session["flash_ok"] = f"Fact '{entity_name}' deleted."
+    except Exception as exc:
+        request.session["flash_err"] = str(exc)
+    return RedirectResponse(
+        f"/web/lore?campaign_id={campaign_id}&entity_type={entity_type}", status_code=303
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Node Registry — Connection Dashboard
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/nodes", response_class=HTMLResponse)
+async def nodes_page(request: Request):
+    db    = _db(request)
+    nodes = await db.get_all_nodes()
+    return _tmpl(request).TemplateResponse("nodes.html", {
+        "request": request,
+        "page":    "nodes",
+        "nodes":   nodes,
+        "flash_ok":  request.session.pop("flash_ok", ""),
+        "flash_err": request.session.pop("flash_err", ""),
+    })
+
+
+@router.post("/nodes/add", response_class=RedirectResponse)
+async def nodes_add(
+    request:   Request,
+    node_name: str = Form(...),
+    node_type: str = Form("ollama"),
+    host:      str = Form(...),
+    model:     str = Form(""),
+    priority:  int = Form(10),
+    notes:     str = Form(""),
+):
+    db = _db(request)
+    try:
+        await db.upsert_node(
+            node_name=node_name.strip(),
+            node_type=node_type,
+            host=host.strip().rstrip("/"),
+            model=model.strip(),
+            priority=priority,
+            notes=notes.strip(),
+        )
+        request.session["flash_ok"] = f"Node '{node_name}' saved."
+    except Exception as exc:
+        request.session["flash_err"] = str(exc)
+    return RedirectResponse("/web/nodes", status_code=303)
+
+
+@router.post("/nodes/toggle/{node_id}")
+async def nodes_toggle(request: Request, node_id: str):
+    db = _db(request)
+    await db.toggle_node(node_id)
+    return {"ok": True}
+
+
+@router.post("/nodes/delete/{node_id}", response_class=RedirectResponse)
+async def nodes_delete(request: Request, node_id: str):
+    db = _db(request)
+    try:
+        await db.delete_node(node_id)
+        request.session["flash_ok"] = "Node removed."
+    except Exception as exc:
+        request.session["flash_err"] = str(exc)
+    return RedirectResponse("/web/nodes", status_code=303)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

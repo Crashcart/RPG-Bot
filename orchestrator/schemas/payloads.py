@@ -53,6 +53,12 @@ class MultimediaType(str, Enum):
     AMBIENT   = "ambient"
 
 
+class OperationalStatus(str, Enum):
+    OPERATIONAL = "OPERATIONAL"
+    DAMAGED     = "DAMAGED"
+    DESTROYED   = "DESTROYED"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 1 – Ingestion Schema: Discord → Orchestrator
 # ─────────────────────────────────────────────────────────────────────────────
@@ -113,6 +119,30 @@ class RuleChunk(BaseModel):
     relevance:   float = Field(ge=0.0, le=1.0)
 
 
+class SubsystemSnapshot(BaseModel):
+    """Mechanical state of a single vehicle component."""
+    subsystem_id:          str
+    subsystem_name:        str
+    subsystem_type:        str
+    operational_status:    OperationalStatus
+    assigned_character_id: str | None = None
+    subsystem_data:        dict[str, Any] = Field(default_factory=dict)
+
+
+class VehicleSnapshot(BaseModel):
+    """
+    Mechanical state of a vehicle and all its subsystems.
+    Included in ContextAssemblyPayload when vehicles are part of the scene.
+    """
+    vehicle_id:         str
+    name:               str
+    asset_type:         str
+    hull_integrity:     int
+    max_hull_integrity: int
+    asset_data:         dict[str, Any]            = Field(default_factory=dict)
+    subsystems:         list[SubsystemSnapshot]   = Field(default_factory=list)
+
+
 class ContextAssemblyPayload(BaseModel):
     """
     Phase 1 output – fed into the Ollama mechanical engine.
@@ -121,6 +151,10 @@ class ContextAssemblyPayload(BaseModel):
     intent_id:          str
     character:          CharacterSnapshot
     inventory_snapshot: list[dict[str, Any]] = Field(default_factory=list)
+    vehicle_context:    list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Vehicle/asset snapshots for vehicles in the active scene.",
+    )
     rule_chunks:        list[RuleChunk]      = Field(default_factory=list)
     raw_input:          str
     assembled_at:       datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -147,6 +181,30 @@ class StatDelta(BaseModel):
     new_value:  Any
 
 
+class SubsystemDelta(BaseModel):
+    """
+    A single subsystem change within a vehicle_delta.
+    Only non-null fields are applied; use '__no_change__' sentinel for
+    assigned_character_id to leave the current assignment intact.
+    """
+    subsystem_name:        str
+    new_status:            OperationalStatus | None = None
+    assigned_character_id: str | None = "__no_change__"
+    # "__no_change__" → leave assignment as-is
+    # None            → unassign (clear the seat)
+    # "<uuid>"        → assign this character
+
+
+class VehicleDelta(BaseModel):
+    """
+    Changes to a vehicle's hull and subsystems from a single action.
+    hull_delta is a signed integer: negative = damage, positive = repair.
+    """
+    vehicle_id:  str
+    hull_delta:  int               = 0
+    subsystems:  list[SubsystemDelta] = Field(default_factory=list)
+
+
 class StateDelta(BaseModel):
     """
     The set of character state changes produced by mechanical resolution.
@@ -160,7 +218,12 @@ class StateDelta(BaseModel):
     )
     inventory_delta: list[dict[str, Any]]   = Field(
         default_factory=list,
-        description="Items added (positive qty) or removed (negative qty)",
+        description="Items added (positive qty) or removed (negative qty). "
+                    "Full JSONB payload is duplicated into the inventories table as-is.",
+    )
+    vehicle_deltas: list[VehicleDelta]      = Field(
+        default_factory=list,
+        description="Hull and subsystem mutations for any vehicles involved in this action.",
     )
 
 

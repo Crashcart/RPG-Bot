@@ -34,6 +34,7 @@ from orchestrator.services import (
     CacheService,
     DatabaseService,
     GeminiClient,
+    NodeRouter,
     OllamaClient,
     RAGService,
     StoryMemoryService,
@@ -49,7 +50,8 @@ logger = logging.getLogger(__name__)
 db            = DatabaseService(settings)
 cache         = CacheService(settings)
 rag           = RAGService(settings)
-ollama        = OllamaClient(settings)
+ollama        = OllamaClient(settings)   # env-default fallback
+node_router   = NodeRouter(db, settings) # multi-node AI mesh
 gemini        = GeminiClient(settings)
 story_memory  = StoryMemoryService(settings)
 pdf_processor = PDFProcessorService(
@@ -61,7 +63,7 @@ pdf_processor = PDFProcessorService(
 
 # Pipeline phase singletons
 ingestion    = IngestionPhase(db, rag)
-adjudication = AdjudicationPhase(ollama)
+adjudication = AdjudicationPhase(node_router)  # uses NodeRouter, not bare OllamaClient
 state_commit = StateCommitPhase(db, cache)
 narration    = NarrationPhase(gemini, story_memory)
 
@@ -72,10 +74,11 @@ async def lifespan(app: FastAPI):
     await db.connect()
     await cache.connect()
     await rag.connect()
-    # story_memory shares the DB pool rather than opening its own connection
     await story_memory.connect(db.pool)
+    await node_router.start()   # begin background health-check loop
     yield
     logger.info("Shutting down Ironclad GM Orchestrator…")
+    await node_router.stop()
     await db.disconnect()
     await cache.disconnect()
 
@@ -105,6 +108,7 @@ app.state.templates    = Jinja2Templates(directory=str(_templates_dir))
 app.state.db           = db
 app.state.cache        = cache
 app.state.pdf_processor = pdf_processor
+app.state.node_router  = node_router
 
 app.include_router(web_router, prefix="/web")
 

@@ -17,8 +17,11 @@ from orchestrator.schemas.payloads import (
     ContextAssemblyPayload,
     DiceRequest,
     OllamaResolutionPayload,
+    OperationalStatus,
     StateDelta,
     StatDelta,
+    SubsystemDelta,
+    VehicleDelta,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,8 +46,17 @@ def _roll_dice(notation: str, modifier: int = 0) -> int:
 class OllamaClient:
     def __init__(self, settings: Settings) -> None:
         self._base_url = settings.ollama_host
-        self._model = settings.ollama_model
-        self._timeout = settings.ollama_timeout_seconds
+        self._model    = settings.ollama_model
+        self._timeout  = settings.ollama_timeout_seconds
+
+    @classmethod
+    def from_node(cls, node: dict, settings: Settings) -> "OllamaClient":
+        """Construct a client pointed at a specific node_registry entry."""
+        obj = cls.__new__(cls)
+        obj._base_url = node["host"].rstrip("/")
+        obj._model    = node["model"] or settings.ollama_model
+        obj._timeout  = settings.ollama_timeout_seconds
+        return obj
 
     async def resolve_action(
         self,
@@ -82,15 +94,66 @@ class OllamaClient:
 
         return self._build_resolution(context.intent_id, payload_dict)
 
+    # Fields stripped from item_data before it is shown to Ollama.
+    # Flavor text in these fields can confuse the mechanical engine.
+    _ITEM_FLAVOR_KEYS = frozenset({
+        "description", "lore", "flavor", "flavor_text",
+        "history", "quote", "notes", "appearance",
+    })
+
+    def _sanitise_inventory(self, inventory: list[dict]) -> list[dict]:
+        """Return inventory with narrative/flavor fields removed.
+
+        Only name, quantity, weight, and mechanical_properties are sent to
+        Ollama — everything else is flavor the adjudication engine must not
+        read.  The full JSONB payload is preserved unchanged in PostgreSQL.
+        """
+        clean = []
+        for item in inventory:
+            mechanical = {
+                k: v for k, v in item.items()
+                if k not in self._ITEM_FLAVOR_KEYS
+            }
+            # Keep mechanical_properties sub-dict intact but strip flavor within it
+            if isinstance(mechanical.get("mechanical_properties"), dict):
+                mechanical["mechanical_properties"] = {
+                    k: v for k, v in mechanical["mechanical_properties"].items()
+                    if k not in self._ITEM_FLAVOR_KEYS
+                }
+            clean.append(mechanical)
+        return clean
+
     def _build_user_prompt(self, ctx: ContextAssemblyPayload) -> str:
         rule_text = "\n".join(
             f"[{c.source}] {c.content}" for c in ctx.rule_chunks
         ) or "No specific rule chunks retrieved."
 
         char = ctx.character
+        inventory_text = json.dumps(self._sanitise_inventory(ctx.inventory_snapshot), indent=2)
+
+        vehicle_block = ""
+        if ctx.vehicle_context:
+            vehicle_lines = []
+            for v in ctx.vehicle_context:
+                line = (
+                    f"  Vehicle: {v['name']} (type={v['asset_type']}, "
+                    f"hull={v['hull_integrity']}/{v['max_hull_integrity']})"
+                )
+                vehicle_lines.append(line)
+                for sub in v.get("subsystems", []):
+                    assigned = sub.get("assigned_character_id") or "uncrewed"
+                    vehicle_lines.append(
+                        f"    Subsystem [{sub['subsystem_type']}] {sub['subsystem_name']}: "
+                        f"status={sub['operational_status']}  crew={assigned}  "
+                        f"stats={json.dumps(sub.get('subsystem_data', {}))}"
+                    )
+            vehicle_block = "\nVEHICLE / ASSET CONTEXT:\n" + "\n".join(vehicle_lines) + "\n"
+
         return (
             f"ACTIVE SYSTEM: {char.system}\n\n"
             f"CHARACTER STATE:\n{json.dumps(char.stats, indent=2)}\n\n"
+            f"INVENTORY (mechanical fields only):\n{inventory_text}\n"
+            f"{vehicle_block}\n"
             f"RULEBOOK CONTEXT:\n{rule_text}\n\n"
             f"PLAYER ACTION: {ctx.raw_input}\n\n"
             "Resolve the action. Output only the JSON payload."
@@ -119,11 +182,29 @@ class OllamaClient:
             for sd in raw_delta.get("stat_deltas", [])
         ]
 
+        # Vehicle deltas — parse subsystem status changes and hull damage
+        vehicle_deltas: list[VehicleDelta] = []
+        for vd in raw_delta.get("vehicle_deltas", []):
+            subsystem_deltas = [
+                SubsystemDelta(
+                    subsystem_name=sd["subsystem_name"],
+                    new_status=OperationalStatus(sd["new_status"]) if sd.get("new_status") else None,
+                    assigned_character_id=sd.get("assigned_character_id", "__no_change__"),
+                )
+                for sd in vd.get("subsystems", [])
+            ]
+            vehicle_deltas.append(VehicleDelta(
+                vehicle_id=vd.get("vehicle_id", ""),
+                hull_delta=int(vd.get("hull_delta", 0)),
+                subsystems=subsystem_deltas,
+            ))
+
         delta = StateDelta(
             character_id=raw_delta.get("character_id", ""),
             stat_deltas=stat_deltas,
             status_change=raw_delta.get("status_change"),
             inventory_delta=raw_delta.get("inventory_delta", []),
+            vehicle_deltas=vehicle_deltas,
         )
 
         return OllamaResolutionPayload(

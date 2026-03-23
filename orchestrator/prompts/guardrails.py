@@ -42,6 +42,13 @@ a protocol violation.
 context. If a rule is ambiguous, apply the most conservative interpretation \
 that is least favorable to the player. Document your citation.
 
+5. VEHICLE RULES — When a VEHICLE / ASSET CONTEXT section is present in the
+prompt, you MUST apply gunnery/piloting checks using the subsystem's stats
+(damage_dice, targeting_bonus, etc.) combined with the character's relevant
+skill.  Station assignment (AssignedCharacter) is changed via
+subsystem_deltas, NOT via stat_deltas.  Hull damage is negative hull_delta.
+If a subsystem is destroyed, set new_status = "DESTROYED".
+
 OUTPUT FORMAT — You must respond with ONLY valid JSON matching this schema:
 {
   "action_type": "<string>",
@@ -53,11 +60,26 @@ OUTPUT FORMAT — You must respond with ONLY valid JSON matching this schema:
     "character_id": "<uuid>",
     "stat_deltas": [{"stat_key": "<key>", "old_value": <any>, "new_value": <any>}],
     "status_change": null,
-    "inventory_delta": []
+    "inventory_delta": [],
+    "vehicle_deltas": [
+      {
+        "vehicle_id": "<uuid>",
+        "hull_delta": <signed integer — negative for damage, positive for repair>,
+        "subsystems": [
+          {
+            "subsystem_name": "<name>",
+            "new_status": "<OPERATIONAL|DAMAGED|DESTROYED|null>",
+            "assigned_character_id": "<uuid|null|'__no_change__'>"
+          }
+        ]
+      }
+    ]
   },
   "rulebook_citations": ["<citation>"],
   "reasoning": "<max 500 chars, mechanical facts only>"
 }
+
+When no vehicles are involved, set vehicle_deltas to [].
 """
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -2,8 +2,11 @@
 Phase 3 – State Commitment
 ===========================
 Atomically applies the mechanical delta to PostgreSQL.
-Publishes a StateCommitPayload to Redis for the CSV sync worker.
-If the delta results in character death, status is set to DEAD immediately.
+Publishes commit events to Redis for the CSV sync worker.
+
+Two event types are published:
+  • state_commit  — character stat/status/inventory changes
+  • vehicle_commit — hull and subsystem mutations for assets
 """
 
 from __future__ import annotations
@@ -32,11 +35,14 @@ class StateCommitPhase:
     async def commit(self, resolution: OllamaResolutionPayload) -> StateCommitPayload:
         """
         1. Fetch pre-commit character state.
-        2. Atomically apply the delta in PostgreSQL.
+        2. Atomically apply the full delta in PostgreSQL
+           (stats + inventory + vehicle subsystems in one transaction).
         3. If character died, mark status = DEAD immediately.
-        4. Publish commit event to Redis for the CSV sync worker.
+        4. Publish commit events to Redis:
+           - state_commit  → triggers character CSV regeneration
+           - vehicle_commit → triggers asset_[vehicleId].csv regeneration
         """
-        delta = resolution.state_delta
+        delta        = resolution.state_delta
         character_id = delta.character_id
 
         # Pre-state snapshot
@@ -46,7 +52,7 @@ class StateCommitPhase:
 
         pre_state = dict(character.stats)
 
-        # Detect lethal outcome: status_change == DEAD or HP drops to zero
+        # Detect lethal outcome: explicit status_change or HP → 0
         lethal = (delta.status_change == CharacterStatus.DEAD)
         if not lethal:
             for sd in delta.stat_deltas:
@@ -55,7 +61,7 @@ class StateCommitPhase:
                     delta.status_change = CharacterStatus.DEAD
                     break
 
-        # Atomic DB write
+        # Atomic DB write (character + inventory + vehicles in one transaction)
         post_state = await self._db.apply_state_delta(delta)
 
         commit = StateCommitPayload(
@@ -67,7 +73,7 @@ class StateCommitPhase:
             lethal=lethal,
         )
 
-        # Notify CSV sync worker via Redis pub/sub
+        # ── Redis: character commit event ─────────────────────────────────────
         await self._cache.client.publish(
             _CSV_SYNC_CHANNEL,
             json.dumps({
@@ -78,11 +84,29 @@ class StateCommitPhase:
             }),
         )
 
+        # ── Redis: vehicle commit events (one per vehicle changed) ────────────
+        for vd in delta.vehicle_deltas:
+            if not vd.vehicle_id:
+                continue
+            await self._cache.client.publish(
+                _CSV_SYNC_CHANNEL,
+                json.dumps({
+                    "event":      "vehicle_commit",
+                    "vehicle_id": vd.vehicle_id,
+                    "hull_delta": vd.hull_delta,
+                }),
+            )
+            logger.info(
+                "Phase 3: vehicle_commit published for vehicle=%s hull_delta=%d",
+                vd.vehicle_id,
+                vd.hull_delta,
+            )
+
         logger.info(
-            "Phase 3 complete: character=%s lethal=%s status=%s",
+            "Phase 3 complete: character=%s lethal=%s vehicles_affected=%d",
             character_id,
             lethal,
-            delta.status_change,
+            len(delta.vehicle_deltas),
         )
 
         return commit

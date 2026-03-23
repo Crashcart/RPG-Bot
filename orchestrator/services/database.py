@@ -145,22 +145,68 @@ class DatabaseService:
                         UUID(delta.character_id),
                     )
 
-                # Apply inventory deltas
+                # Apply inventory deltas — full JSONB payload is duplicated as-is
                 for item in delta.inventory_delta:
                     qty = item.get("quantity", 0)
                     if qty > 0:
-                        await conn.execute(
-                            "INSERT INTO inventories (character_id, item_data) VALUES ($1, $2)",
-                            UUID(delta.character_id),
-                            json.dumps(item),
-                        )
-                    elif qty < 0:
-                        # Remove by item name
-                        await conn.execute(
-                            "DELETE FROM inventories WHERE character_id = $1 AND item_data->>'name' = $2 LIMIT 1",
+                        # Upsert: if an item with the same name exists, add quantity;
+                        # otherwise insert the full JSONB payload unchanged.
+                        existing = await conn.fetchrow(
+                            """
+                            SELECT id, item_data FROM inventories
+                            WHERE character_id = $1
+                              AND item_data->>'name' = $2
+                            LIMIT 1
+                            FOR UPDATE
+                            """,
                             UUID(delta.character_id),
                             item.get("name"),
                         )
+                        if existing:
+                            existing_data = (
+                                json.loads(existing["item_data"])
+                                if isinstance(existing["item_data"], str)
+                                else dict(existing["item_data"])
+                            )
+                            existing_data["quantity"] = (
+                                int(existing_data.get("quantity", 0)) + qty
+                            )
+                            await conn.execute(
+                                "UPDATE inventories SET item_data = $1, updated_at = NOW() WHERE id = $2",
+                                json.dumps(existing_data),
+                                existing["id"],
+                            )
+                        else:
+                            # Duplicate the full JSONB payload into the inventories table
+                            await conn.execute(
+                                "INSERT INTO inventories (character_id, item_data) VALUES ($1, $2)",
+                                UUID(delta.character_id),
+                                json.dumps(item),
+                            )
+                    elif qty < 0:
+                        await conn.execute(
+                            """
+                            DELETE FROM inventories
+                            WHERE id = (
+                                SELECT id FROM inventories
+                                WHERE character_id = $1 AND item_data->>'name' = $2
+                                LIMIT 1
+                            )
+                            """,
+                            UUID(delta.character_id),
+                            item.get("name"),
+                        )
+
+                # Apply vehicle deltas within the same transaction
+                for vd in delta.vehicle_deltas:
+                    if not vd.vehicle_id:
+                        continue
+                    await self.apply_vehicle_delta(
+                        conn,
+                        vehicle_id=vd.vehicle_id,
+                        hull_delta=vd.hull_delta,
+                        subsystem_changes=[s.model_dump() for s in vd.subsystems],
+                    )
 
                 return stats
 
@@ -389,6 +435,262 @@ class DatabaseService:
             }
             for r in rows
         ]
+
+    # ── Vehicle / Asset Queries ────────────────────────────────────────────────
+
+    async def get_vehicles_for_campaign(self, campaign_id: str) -> list[dict[str, Any]]:
+        """Return all vehicles with their subsystems for a campaign."""
+        vehicle_rows = await self.pool.fetch(
+            """
+            SELECT id, name, asset_type, hull_integrity, max_hull_integrity, asset_data
+            FROM vehicles
+            WHERE campaign_id = $1
+            ORDER BY name
+            """,
+            UUID(campaign_id),
+        )
+        vehicles = []
+        for vr in vehicle_rows:
+            vehicle_id = str(vr["id"])
+            sub_rows = await self.pool.fetch(
+                """
+                SELECT id, subsystem_name, subsystem_type, operational_status,
+                       assigned_character_id, subsystem_data
+                FROM vehicle_subsystems
+                WHERE vehicle_id = $1
+                ORDER BY subsystem_type, subsystem_name
+                """,
+                vr["id"],
+            )
+            subsystems = [
+                {
+                    "subsystem_id":           str(sr["id"]),
+                    "subsystem_name":         sr["subsystem_name"],
+                    "subsystem_type":         sr["subsystem_type"],
+                    "operational_status":     sr["operational_status"],
+                    "assigned_character_id":  str(sr["assigned_character_id"]) if sr["assigned_character_id"] else None,
+                    "subsystem_data":         json.loads(sr["subsystem_data"]) if isinstance(sr["subsystem_data"], str) else dict(sr["subsystem_data"]),
+                }
+                for sr in sub_rows
+            ]
+            vehicles.append({
+                "vehicle_id":         vehicle_id,
+                "name":               vr["name"],
+                "asset_type":         vr["asset_type"],
+                "hull_integrity":     vr["hull_integrity"],
+                "max_hull_integrity": vr["max_hull_integrity"],
+                "asset_data":         json.loads(vr["asset_data"]) if isinstance(vr["asset_data"], str) else dict(vr["asset_data"]),
+                "subsystems":         subsystems,
+            })
+        return vehicles
+
+    async def apply_vehicle_delta(
+        self,
+        conn: asyncpg.Connection,
+        vehicle_id: str,
+        hull_delta: int,
+        subsystem_changes: list[dict],
+    ) -> dict[str, Any]:
+        """
+        Apply hull damage/repair and subsystem mutations within an existing
+        transaction.  Returns the post-commit vehicle state dict.
+        Called from apply_state_delta when vehicle_deltas is non-empty.
+        """
+        # Update hull integrity (clamped 0..max)
+        if hull_delta != 0:
+            await conn.execute(
+                """
+                UPDATE vehicles
+                SET hull_integrity = GREATEST(0, LEAST(max_hull_integrity, hull_integrity + $1)),
+                    updated_at = NOW()
+                WHERE id = $2
+                """,
+                hull_delta,
+                UUID(vehicle_id),
+            )
+
+        # Apply subsystem changes
+        for sc in subsystem_changes:
+            name = sc.get("subsystem_name")
+            if not name:
+                continue
+            new_status = sc.get("new_status")
+            assigned   = sc.get("assigned_character_id", "__no_change__")
+
+            if new_status and assigned == "__no_change__":
+                await conn.execute(
+                    """
+                    UPDATE vehicle_subsystems
+                    SET operational_status = $1, updated_at = NOW()
+                    WHERE vehicle_id = $2 AND subsystem_name = $3
+                    """,
+                    new_status,
+                    UUID(vehicle_id),
+                    name,
+                )
+            elif new_status and assigned != "__no_change__":
+                await conn.execute(
+                    """
+                    UPDATE vehicle_subsystems
+                    SET operational_status = $1,
+                        assigned_character_id = $2,
+                        updated_at = NOW()
+                    WHERE vehicle_id = $3 AND subsystem_name = $4
+                    """,
+                    new_status,
+                    UUID(assigned) if assigned else None,
+                    UUID(vehicle_id),
+                    name,
+                )
+            elif assigned != "__no_change__":
+                await conn.execute(
+                    """
+                    UPDATE vehicle_subsystems
+                    SET assigned_character_id = $1, updated_at = NOW()
+                    WHERE vehicle_id = $2 AND subsystem_name = $3
+                    """,
+                    UUID(assigned) if assigned else None,
+                    UUID(vehicle_id),
+                    name,
+                )
+
+        # Return current vehicle state
+        row = await conn.fetchrow(
+            "SELECT name, asset_type, hull_integrity, max_hull_integrity FROM vehicles WHERE id = $1",
+            UUID(vehicle_id),
+        )
+        return dict(row) if row else {}
+
+    # ── Node Registry ─────────────────────────────────────────────────────────
+
+    async def get_all_nodes(self) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            """
+            SELECT id, node_name, node_type, host, model, priority,
+                   enabled, status, last_seen, notes
+            FROM node_registry
+            ORDER BY priority, node_name
+            """
+        )
+        return [
+            {
+                "id":        str(r["id"]),
+                "node_name": r["node_name"],
+                "node_type": r["node_type"],
+                "host":      r["host"],
+                "model":     r["model"],
+                "priority":  r["priority"],
+                "enabled":   r["enabled"],
+                "status":    r["status"],
+                "last_seen": r["last_seen"].strftime("%Y-%m-%d %H:%M") if r["last_seen"] else "",
+                "notes":     r["notes"] or "",
+            }
+            for r in rows
+        ]
+
+    async def get_enabled_ollama_nodes(self) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            """
+            SELECT id, node_name, host, model, priority, status
+            FROM node_registry
+            WHERE node_type = 'ollama' AND enabled = TRUE
+            ORDER BY priority
+            """
+        )
+        return [
+            {
+                "id":        str(r["id"]),
+                "node_name": r["node_name"],
+                "host":      r["host"],
+                "model":     r["model"],
+                "priority":  r["priority"],
+                "status":    r["status"],
+            }
+            for r in rows
+        ]
+
+    async def upsert_node(
+        self,
+        node_name: str,
+        node_type: str,
+        host: str,
+        model: str,
+        priority: int,
+        notes: str = "",
+    ) -> None:
+        await self.pool.execute(
+            """
+            INSERT INTO node_registry
+                (node_name, node_type, host, model, priority, notes, enabled, status)
+            VALUES ($1, $2, $3, $4, $5, $6, TRUE, 'unknown')
+            ON CONFLICT (node_name) DO UPDATE
+                SET node_type  = EXCLUDED.node_type,
+                    host       = EXCLUDED.host,
+                    model      = EXCLUDED.model,
+                    priority   = EXCLUDED.priority,
+                    notes      = EXCLUDED.notes,
+                    updated_at = NOW()
+            """,
+            node_name, node_type, host, model, priority, notes,
+        )
+
+    async def update_node_status(
+        self, node_name: str, status: str, last_seen: Any
+    ) -> None:
+        await self.pool.execute(
+            """
+            UPDATE node_registry
+            SET status = $1, last_seen = $2, updated_at = NOW()
+            WHERE node_name = $3
+            """,
+            status, last_seen, node_name,
+        )
+
+    async def toggle_node(self, node_id: str) -> None:
+        await self.pool.execute(
+            "UPDATE node_registry SET enabled = NOT enabled WHERE id = $1",
+            UUID(node_id),
+        )
+
+    async def delete_node(self, node_id: str) -> None:
+        await self.pool.execute(
+            "DELETE FROM node_registry WHERE id = $1",
+            UUID(node_id),
+        )
+
+    # ── Lore CRUD ─────────────────────────────────────────────────────────────
+
+    async def upsert_story_fact(
+        self,
+        campaign_id: str,
+        entity_type: str,
+        entity_name: str,
+        summary: str,
+        detail: str = "",
+    ) -> None:
+        await self.pool.execute(
+            """
+            INSERT INTO story_context
+                (campaign_id, entity_type, entity_name, summary, detail)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (campaign_id, entity_type, entity_name) DO UPDATE
+                SET summary            = EXCLUDED.summary,
+                    detail             = EXCLUDED.detail,
+                    last_updated_at    = NOW()
+            """,
+            UUID(campaign_id), entity_type, entity_name, summary, detail,
+        )
+
+    async def delete_story_fact(
+        self, campaign_id: str, entity_type: str, entity_name: str
+    ) -> None:
+        await self.pool.execute(
+            """
+            DELETE FROM story_context
+            WHERE campaign_id = $1 AND entity_type = $2 AND entity_name = $3
+            """,
+            UUID(campaign_id), entity_type, entity_name,
+        )
 
     # ── Rule Registry ─────────────────────────────────────────────────────────
 
