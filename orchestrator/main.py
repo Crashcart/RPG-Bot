@@ -5,7 +5,9 @@ FastAPI application that drives the four-phase pipeline:
   Phase 1: Ingestion & Context Assembly
   Phase 2: Mechanical Adjudication (Ollama)
   Phase 3: State Commitment (PostgreSQL + Redis)
-  Phase 4: Narrative Generation (Gemini)
+  Phase 4: Narrative Generation — GM Director (two-tier storyteller)
+             Tier 1: GMDirector (Gemini or auto-promoted Ollama)
+             Tier 2: SubAgentDispatcher → actor/scribe Ollama nodes
 """
 
 from __future__ import annotations
@@ -34,10 +36,12 @@ from orchestrator.services import (
     CacheService,
     DatabaseService,
     GeminiClient,
+    GMDirector,
     NodeRouter,
     OllamaClient,
     RAGService,
     StoryMemoryService,
+    SubAgentDispatcher,
 )
 from orchestrator.services.pdf_processor import PDFProcessorService
 
@@ -61,11 +65,25 @@ pdf_processor = PDFProcessorService(
     chroma_port=settings.chroma_port,
 )
 
+# ── Tier 2: Sub-Agent Dispatcher ─────────────────────────────────────────────
+# Routes delegation tasks from the GM Director to actor/scribe Ollama nodes.
+sub_agent_dispatcher = SubAgentDispatcher(node_router)
+
+# ── Tier 1: GM Director (Central Storyteller) ─────────────────────────────────
+# Selects the storyteller per-turn (Gemini or auto-promoted Ollama), runs the
+# planning pass, dispatches sub-agents, synthesizes, and applies immersion filters.
+gm_director = GMDirector(
+    gemini=gemini,
+    node_router=node_router,
+    dispatcher=sub_agent_dispatcher,
+    story_memory=story_memory,
+)
+
 # Pipeline phase singletons
 ingestion    = IngestionPhase(db, rag)
-adjudication = AdjudicationPhase(node_router)  # NodeRouter picks best available node
+adjudication = AdjudicationPhase(node_router)
 state_commit = StateCommitPhase(db, cache)
-narration    = NarrationPhase(gemini, story_memory, node_router)  # storyteller toggle
+narration    = NarrationPhase(gm_director)   # Phase 4 fully delegated to GMDirector
 
 
 @asynccontextmanager

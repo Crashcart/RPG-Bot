@@ -52,18 +52,59 @@ def _roll_dice(notation: str, modifier: int = 0) -> int:
 
 class OllamaClient:
     def __init__(self, settings: Settings) -> None:
-        self._base_url = settings.ollama_host
-        self._model    = settings.ollama_model
-        self._timeout  = settings.ollama_timeout_seconds
+        self._base_url  = settings.ollama_host
+        self._model     = settings.ollama_model
+        self._timeout   = settings.ollama_timeout_seconds
+        self._node_name = "env-default"
 
     @classmethod
     def from_node(cls, node: dict, settings: Settings) -> "OllamaClient":
         """Construct a client pointed at a specific node_registry entry."""
         obj = cls.__new__(cls)
-        obj._base_url = node["host"].rstrip("/")
-        obj._model    = node["model"] or settings.ollama_model
-        obj._timeout  = settings.ollama_timeout_seconds
+        obj._base_url  = node["host"].rstrip("/")
+        obj._model     = node["model"] or settings.ollama_model
+        obj._timeout   = settings.ollama_timeout_seconds
+        obj._node_name = node.get("node_name", "unknown")
         return obj
+
+    # ── Generic text generation (used by GMDirector and SubAgentDispatcher) ──
+
+    async def generate(
+        self,
+        system_prompt: str,
+        user_prompt:   str,
+        max_tokens:    int = 800,
+    ) -> str:
+        """
+        Low-level free-form text generation.
+
+        Used by the GM Director for planning and synthesis passes, and by the
+        SubAgentDispatcher for uncensored sub-agent content.  No JSON schema
+        is applied — the output is raw text.
+
+        Args:
+            system_prompt: System / role instruction injected before the user message.
+            user_prompt:   The task or question.
+            max_tokens:    Maximum tokens to generate (maps to num_predict in Ollama).
+
+        Returns:
+            The generated text, stripped of leading/trailing whitespace.
+        """
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.post(
+                f"{self._base_url}/api/chat",
+                json={
+                    "model":  self._model,
+                    "stream": False,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user",   "content": user_prompt},
+                    ],
+                    "options": {"num_predict": max_tokens},
+                },
+            )
+            response.raise_for_status()
+        return response.json()["message"]["content"].strip()
 
     async def resolve_action(
         self,

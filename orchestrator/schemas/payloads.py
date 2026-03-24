@@ -401,6 +401,55 @@ class NarrativeResponsePayload(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# GM Director Schemas (Task 3 — Two-Tier Storyteller Architecture)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SubAgentTask(BaseModel):
+    """
+    A single delegation unit produced by the GM Director's planning pass.
+    Dispatched concurrently to a local Ollama node tagged actor or scribe.
+    """
+    task_id:              str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    task_type:            str = Field(
+        ...,
+        description="npc_dialogue | environmental_description | combat_flavour | item_description",
+    )
+    entity_name:          str = Field(..., description="NPC name, location, weapon, or item name")
+    entity_role:          str = Field(..., description="One-sentence description of the entity's nature")
+    scene_context:        str = Field(..., description="2-3 sentence scene brief for the sub-agent")
+    player_action_context: str = Field(..., description="What the player did that triggered this task")
+    tone:                 str = Field(default="gritty", description="gritty | menacing | humorous | …")
+    max_words:            int = Field(default=80, ge=20, le=300)
+
+
+class GMPlanResult(BaseModel):
+    """
+    The structured output of the GM Director's planning pass.
+    Produced internally — never shown to the player.
+    """
+    sub_tasks:       list[SubAgentTask] = Field(default_factory=list)
+    direct_elements: list[str]          = Field(
+        default_factory=list,
+        description="Scene elements the GM will narrate directly without sub-agent delegation",
+    )
+
+
+class SubAgentResult(BaseModel):
+    """
+    The result returned by a single sub-agent execution.
+    Aggregated by SubAgentDispatcher and handed to the GM for synthesis.
+    """
+    task:            SubAgentTask
+    raw_output:      str             = Field(..., description="Uncensored raw text from the sub-agent node")
+    node_name:       str             = Field(default="unknown", description="Which Ollama node handled this task")
+    ttft_ms:         int | None      = Field(default=None, description="Time-to-first-token in ms for this task")
+    brand_violation: bool            = Field(
+        default=False,
+        description="True if a brand violation was detected and stripped (best-effort fallback)",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Top-Level Pipeline Result (persisted to action_log)
 # ─────────────────────────────────────────────────────────────────────────────
 

@@ -18,8 +18,59 @@ _GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 class GeminiClient:
     def __init__(self, settings: Settings) -> None:
-        self._api_key = settings.gemini_api_key
-        self._model = settings.gemini_model
+        self._api_key   = settings.gemini_api_key
+        self._model     = settings.gemini_model
+        self._node_name = "gemini-cloud"
+
+    # ── Generic text generation (used by GMDirector) ─────────────────────────
+
+    async def generate(
+        self,
+        system_prompt: str,
+        user_prompt:   str,
+        max_tokens:    int = 800,
+    ) -> str:
+        """
+        Low-level free-form text generation via Gemini.
+
+        Used by the GM Director for planning and synthesis passes when the
+        Cloud Storyteller is active.  Mirrors the same interface as
+        OllamaClient.generate() so the GMDirector can call either
+        transparently.
+
+        Args:
+            system_prompt: Gemini system_instruction text.
+            user_prompt:   User-turn content.
+            max_tokens:    maxOutputTokens for the generation config.
+
+        Returns:
+            The generated text, stripped of leading/trailing whitespace.
+        """
+        payload = {
+            "system_instruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"parts": [{"text": user_prompt}]}],
+            "generationConfig": {
+                "temperature":     0.85,
+                "maxOutputTokens": max_tokens,
+                "topP":            0.95,
+            },
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HARASSMENT",         "threshold": "BLOCK_NONE"},
+            ],
+        }
+        url = f"{_GEMINI_API_BASE}/{self._model}:generateContent?key={self._api_key}"
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+
+        data = response.json()
+        try:
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except (KeyError, IndexError) as exc:
+            logger.error("Unexpected Gemini response in generate(): %s", json.dumps(data)[:400])
+            raise ValueError("Could not extract text from Gemini response.") from exc
 
     async def generate_narrative(
         self, request: NarrativeRequestPayload

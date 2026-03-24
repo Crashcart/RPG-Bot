@@ -5,6 +5,8 @@ from .gemini_client import GeminiClient
 from .node_router import NodeRouter
 from .rag_service import RAGService
 from .story_memory import StoryMemoryService
+from .sub_agent_dispatcher import SubAgentDispatcher
+from .gm_director import GMDirector
 
 __all__ = [
     "DatabaseService",
@@ -14,4 +16,6 @@ __all__ = [
     "NodeRouter",
     "RAGService",
     "StoryMemoryService",
+    "SubAgentDispatcher",
+    "GMDirector",
 ]
