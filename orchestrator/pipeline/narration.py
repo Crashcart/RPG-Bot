@@ -153,8 +153,17 @@ class NarrationPhase:
         self, request: NarrativeRequestPayload
     ) -> NarrativeResponsePayload:
         """
-        Local path — promotes the highest-priority 'narrative'-tagged Ollama
-        node.  Falls back to Gemini with a warning if no such node is available.
+        Local path — Auto-Promotion Protocol.
+
+        Calls NodeRouter.get_storyteller_client() which sorts available
+        'narrative'-tagged nodes by their most recently measured TTFT
+        (latency_ms ASC) rather than static priority.  Whichever node
+        responded fastest in the last benchmark wins this turn, even if a
+        higher-priority node exists that is currently under load.
+
+        Fallback chain:
+          1. Fastest narrative-tagged node (TTFT order)
+          2. Gemini + operator warning (no narrative node available)
         """
         if self._node_router is None:
             logger.warning(
@@ -163,18 +172,20 @@ class NarrationPhase:
             )
             return await self._narrate_via_gemini(request)
 
-        local_client = await self._node_router.get_ollama_client_for_role(_NARRATIVE_ROLE)
+        # Auto-Promotion: latency-sorted node selection
+        local_client = await self._node_router.get_storyteller_client()
 
         if local_client is None:
             logger.warning(
-                "Phase 4: Cloud Storyteller is OFF but no node with role='narrative' "
-                "is online. Falling back to Gemini. Tag a node as 'narrative' in "
-                "the White Portal to enable fully-local operation."
+                "Phase 4: Auto-Promotion found no available narrative node. "
+                "Falling back to Gemini. Tag at least one node with role='narrative' "
+                "in the White Portal to enable fully-local uncensored operation."
             )
             return await self._narrate_via_gemini(request)
 
         logger.info(
-            "Phase 4: Local Storyteller active — node=%s (uncensored mode).",
+            "Phase 4: Local Storyteller active via Auto-Promotion — "
+            "node=%s (uncensored mode).",
             local_client._base_url,
         )
         return await local_client.generate_narrative(request)

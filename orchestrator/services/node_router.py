@@ -1,42 +1,56 @@
 """
 Ironclad GM – AI Node Router
 ==============================
-Implements the "Hybrid AI Mesh" role-based routing architecture.
+Implements the "Hybrid AI Mesh" role-based routing architecture with
+real-time latency benchmarking and auto-promotion.
 
 Routing Strategy
 ----------------
-Every incoming task carries a *role* label (e.g. "adjudication", "narrative",
-"scribe", "vision").  The router finds the highest-priority enabled Ollama node
-that has been tagged with that role.  If no role-tagged node is available, it
-falls back to the standard priority-ordered list, then finally to the
-env-configured default node.
+Every task carries a *role* label (adjudication, narrative, scribe, …).
+The router selects the best available node for that role using two modes:
 
-Role → Task Mapping
--------------------
-  adjudication  Phase 2  – mechanical resolution (default for all nodes)
-  narrative     Phase 4  – local storyteller (active when Cloud Storyteller OFF)
-  scribe        Phase 4b – fact extraction / lore DB writing
-  vision        future   – OCR / image analysis
-  code_gen      future   – code generation tasks
+  Priority mode   – adjudication and generic requests.  Nodes are sorted by
+                    the static `priority` column (lower = higher preference).
+                    Stable, predictable, low-overhead.
 
-Storyteller Toggle
-------------------
-The operator can flip "storyteller_api_enabled" in system_settings at runtime
-via the White Portal.  The router exposes `is_storyteller_enabled()` which
-reads the DB so the NarrationPhase can decide whether to call Gemini or promote
-a local narrative node.
+  Latency mode    – narrative/storyteller selection when the Cloud Storyteller
+                    is toggled OFF.  Nodes are sorted by the most recently
+                    measured TTFT (Time to First Token), so whichever box is
+                    fastest right now wins — even if it normally has a lower
+                    static priority.
 
-Health Loop
------------
-A background task probes every registered Ollama node via GET /api/tags every
-30 seconds and writes status + last_seen to the node_registry table, keeping
-the Live Node Status dashboard current.
+Heartbeat Benchmark (TTFT)
+--------------------------
+Every health-check cycle (every 30 s by default) the router:
+  1. Probes each enabled Ollama node with GET /api/tags to determine
+     online / offline / degraded status (unchanged).
+  2. For nodes that are online or degraded it also sends a tiny streaming
+     "heartbeat prompt" ("Reply with only the single word: ready") and
+     measures the milliseconds until the first token arrives.
+  3. Writes latency_ms + latency_measured_at to node_registry.
+
+The heartbeat and the status probe run concurrently per-node so the loop
+completes in O(single slowest probe) rather than O(sum of all probes).
+
+Auto-Promotion Protocol
+-----------------------
+When `get_storyteller_client()` is called:
+  1. `is_storyteller_enabled()` returns False  → caller knows to skip Gemini.
+  2. Router runs `get_nodes_for_role_by_latency("narrative")` — same role filter
+     as before, but ORDER BY latency_ms ASC NULLS LAST instead of priority.
+  3. First non-offline node wins.  If the Gaming Rig is rendering video and its
+     TTFT just climbed to 4 s, the Synology (TTFT 800 ms) automatically
+     becomes the DM for this turn.
+  4. Fallback: priority-order if no benchmarked nodes available.
+  5. Final fallback: None  (NarrationPhase handles the Gemini fallback).
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -51,31 +65,16 @@ logger = logging.getLogger(__name__)
 
 _HEALTH_INTERVAL_SECONDS = 30
 _PROBE_TIMEOUT_SECONDS   = 5
-
-# Roles considered acceptable as generic adjudication nodes when no specific
-# role match exists (any node without roles still fills this).
-_ADJUDICATION_FALLBACK = "adjudication"
+_TTFT_TIMEOUT_SECONDS    = 8   # max wait for first token in heartbeat
+_HEARTBEAT_PROMPT        = "Reply with only the single word: ready"
+_ADJUDICATION_FALLBACK   = "adjudication"
+_NARRATIVE_ROLE          = "narrative"
 
 
 class NodeRouter:
     """
-    Routes AI tasks to the best available node based on capability tags.
-
-    Usage:
-        router = NodeRouter(db, settings)
-        await router.start()
-
-        # Role-based (specific capability required)
-        client = await router.get_ollama_client_for_role("narrative")
-
-        # Generic (any available node)
-        client = await router.get_ollama_client()
-
-        # Storyteller toggle
-        if await router.is_storyteller_enabled():
-            ...use Gemini...
-
-        await router.stop()
+    Routes AI tasks to the best available node based on capability tags
+    and real-time TTFT measurements.
     """
 
     def __init__(self, db: "DatabaseService", settings: "Settings") -> None:
@@ -86,9 +85,11 @@ class NodeRouter:
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        asyncio.create_task(self._check_all_nodes())   # immediate probe on startup
+        asyncio.create_task(self._check_all_nodes())  # immediate on startup
         self._task = asyncio.create_task(self._health_loop())
-        logger.info("NodeRouter started — health loop every %ds.", _HEALTH_INTERVAL_SECONDS)
+        logger.info(
+            "NodeRouter started — health+TTFT loop every %ds.", _HEALTH_INTERVAL_SECONDS
+        )
 
     async def stop(self) -> None:
         if self._task:
@@ -101,18 +102,49 @@ class NodeRouter:
     # ── System Settings ───────────────────────────────────────────────────────
 
     async def is_storyteller_enabled(self) -> bool:
-        """Return True if the Cloud Storyteller (Gemini) is enabled."""
         val = await self._db.get_system_setting("storyteller_api_enabled", default=True)
         return bool(val)
 
-    # ── Role-Based Client Selection ───────────────────────────────────────────
+    # ── Auto-Promotion: Latency-Aware Storyteller Selection ───────────────────
+
+    async def get_storyteller_client(self) -> "OllamaClient | None":
+        """
+        Return the fastest currently-responding local Ollama node with the
+        'narrative' role, selected by TTFT (Auto-Promotion Protocol).
+
+        Call this when is_storyteller_enabled() is False.  The method is
+        intentionally separate from get_ollama_client_for_role() so the
+        latency sort is only applied to storyteller selection — adjudication
+        still uses the deterministic priority order.
+
+        Returns None if no suitable node is available (caller falls back to
+        Gemini with a warning).
+        """
+        from orchestrator.services.ollama_client import OllamaClient
+
+        # Latency-sorted narrative nodes (TTFT ASC NULLS LAST, then priority)
+        nodes = await self._db.get_nodes_for_role_by_latency(_NARRATIVE_ROLE)
+        for node in nodes:
+            if node["status"] == "offline":
+                continue
+            logger.info(
+                "NodeRouter auto-promoted '%s' as Storyteller "
+                "(TTFT=%s ms, priority=%d).",
+                node["node_name"],
+                node["latency_ms"] if node["latency_ms"] is not None else "?",
+                node["priority"],
+            )
+            return OllamaClient.from_node(node, self._settings)
+
+        logger.warning(
+            "NodeRouter: no online narrative-tagged node found for auto-promotion."
+        )
+        return None
+
+    # ── Role-Based Client Selection (Priority Mode) ───────────────────────────
 
     async def get_ollama_client_for_role(self, role: str) -> "OllamaClient | None":
-        """
-        Return the highest-priority online Ollama node tagged with *role*.
-        Returns None if no suitable node is found (caller should fall back or
-        raise an appropriate error).
-        """
+        """Return the highest-priority online node tagged with *role*."""
         from orchestrator.services.ollama_client import OllamaClient
 
         nodes = await self._db.get_nodes_for_role(role)
@@ -120,42 +152,35 @@ class NodeRouter:
             if node["status"] == "offline":
                 continue
             logger.debug(
-                "NodeRouter[role=%s]: selected node '%s' (priority=%d)",
+                "NodeRouter[role=%s]: selected '%s' (priority=%d, TTFT=%s ms)",
                 role, node["node_name"], node["priority"],
+                node.get("latency_ms", "?"),
             )
             return OllamaClient.from_node(node, self._settings)
 
-        logger.warning("NodeRouter: no online node found for role '%s'.", role)
+        logger.warning("NodeRouter: no online node for role '%s'.", role)
         return None
 
     async def get_ollama_client(self) -> "OllamaClient":
         """
-        Return the highest-priority online node (regardless of role tags).
-        Nodes explicitly tagged 'adjudication' are preferred first; then any
-        node sorted by priority; then the env-configured default.
+        Generic adjudication path: adjudication-tagged nodes first, then any
+        enabled node, then env-configured default.
         """
         from orchestrator.services.ollama_client import OllamaClient
 
-        # 1. Try adjudication-tagged nodes first
         client = await self.get_ollama_client_for_role(_ADJUDICATION_FALLBACK)
         if client:
             return client
 
-        # 2. Fall back to any enabled online node
         nodes = await self._db.get_enabled_ollama_nodes()
         for node in nodes:
             if node["status"] != "offline":
-                logger.debug(
-                    "NodeRouter[generic]: selected node '%s' (priority=%d)",
-                    node["node_name"], node["priority"],
-                )
                 return OllamaClient.from_node(node, self._settings)
 
-        # 3. Last resort: env-configured default
         logger.warning("NodeRouter: no enabled nodes in registry, using env default.")
         return OllamaClient(self._settings)
 
-    # ── Health Loop ───────────────────────────────────────────────────────────
+    # ── Health + TTFT Loop ────────────────────────────────────────────────────
 
     async def _health_loop(self) -> None:
         while True:
@@ -173,16 +198,85 @@ class NodeRouter:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _probe_and_update(self, node: dict) -> None:
-        status = await self._probe_node(node["host"])
-        now    = datetime.now(timezone.utc)
+        """
+        Run status probe AND TTFT benchmark concurrently for a single node.
+        Both complete (or time out) before writing results to the DB.
+        """
+        status_task = asyncio.create_task(self._probe_node(node["host"]))
+        ttft_task   = asyncio.create_task(
+            self._measure_ttft(node["host"], node["model"] or self._settings.ollama_model)
+        )
+
+        status, ttft_ms = await asyncio.gather(status_task, ttft_task)
+        now = datetime.now(timezone.utc)
+
         await self._db.update_node_status(node["node_name"], status, now)
-        logger.debug("NodeRouter probe: %s → %s", node["node_name"], status)
+
+        if ttft_ms is not None:
+            await self._db.update_node_latency(node["node_name"], ttft_ms)
+
+        logger.debug(
+            "NodeRouter probe: %-20s  status=%-8s  TTFT=%s ms",
+            node["node_name"],
+            status,
+            ttft_ms if ttft_ms is not None else "timeout",
+        )
+
+    # ── Low-Level Probes ──────────────────────────────────────────────────────
 
     @staticmethod
     async def _probe_node(host: str) -> str:
+        """GET /api/tags — lightweight availability check."""
         try:
             async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT_SECONDS) as client:
                 r = await client.get(f"{host}/api/tags")
                 return "online" if r.status_code == 200 else "degraded"
         except Exception:
             return "offline"
+
+    @staticmethod
+    async def _measure_ttft(host: str, model: str) -> int | None:
+        """
+        Measure Time to First Token in milliseconds by streaming a minimal
+        heartbeat prompt and timing until the first response chunk arrives.
+
+        The heartbeat prompt ("Reply with only the single word: ready") is
+        intentionally trivial so the measurement reflects infrastructure
+        latency rather than generation difficulty.
+
+        Returns None if the node is unreachable or does not respond within
+        _TTFT_TIMEOUT_SECONDS.
+        """
+        payload = {
+            "model":  model,
+            "stream": True,
+            "messages": [
+                {"role": "user", "content": _HEARTBEAT_PROMPT}
+            ],
+        }
+        t_start = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=_TTFT_TIMEOUT_SECONDS) as client:
+                async with client.stream(
+                    "POST", f"{host}/api/chat", json=payload
+                ) as response:
+                    response.raise_for_status()
+                    async for raw_line in response.aiter_lines():
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        # First non-empty line = first token chunk
+                        ttft_ms = int((time.monotonic() - t_start) * 1000)
+                        # Optionally verify it's a real content chunk
+                        try:
+                            chunk = json.loads(line)
+                            content = chunk.get("message", {}).get("content", "")
+                            # Skip empty content frames (some models emit a blank first chunk)
+                            if not content and not chunk.get("done", False):
+                                continue
+                        except (json.JSONDecodeError, KeyError):
+                            pass  # treat any parseable line as first token
+                        return ttft_ms
+        except Exception:
+            pass
+        return None

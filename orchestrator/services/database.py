@@ -567,24 +567,27 @@ class DatabaseService:
         rows = await self.pool.fetch(
             """
             SELECT id, node_name, node_type, host, model, priority,
-                   enabled, status, last_seen, notes, roles
+                   enabled, status, last_seen, notes, roles,
+                   latency_ms, latency_measured_at
             FROM node_registry
             ORDER BY priority, node_name
             """
         )
         return [
             {
-                "id":        str(r["id"]),
-                "node_name": r["node_name"],
-                "node_type": r["node_type"],
-                "host":      r["host"],
-                "model":     r["model"],
-                "priority":  r["priority"],
-                "enabled":   r["enabled"],
-                "status":    r["status"],
-                "last_seen": r["last_seen"].strftime("%Y-%m-%d %H:%M") if r["last_seen"] else "",
-                "notes":     r["notes"] or "",
-                "roles":     json.loads(r["roles"]) if isinstance(r["roles"], str) else list(r["roles"] or []),
+                "id":                   str(r["id"]),
+                "node_name":            r["node_name"],
+                "node_type":            r["node_type"],
+                "host":                 r["host"],
+                "model":                r["model"],
+                "priority":             r["priority"],
+                "enabled":              r["enabled"],
+                "status":               r["status"],
+                "last_seen":            r["last_seen"].strftime("%Y-%m-%d %H:%M") if r["last_seen"] else "",
+                "notes":                r["notes"] or "",
+                "roles":                json.loads(r["roles"]) if isinstance(r["roles"], str) else list(r["roles"] or []),
+                "latency_ms":           r["latency_ms"],
+                "latency_measured_at":  r["latency_measured_at"].strftime("%H:%M:%S") if r["latency_measured_at"] else "",
             }
             for r in rows
         ]
@@ -616,7 +619,7 @@ class DatabaseService:
         sorted by ascending priority (best first)."""
         rows = await self.pool.fetch(
             """
-            SELECT id, node_name, host, model, priority, status, roles
+            SELECT id, node_name, host, model, priority, status, roles, latency_ms
             FROM node_registry
             WHERE node_type = 'ollama'
               AND enabled   = TRUE
@@ -627,16 +630,63 @@ class DatabaseService:
         )
         return [
             {
-                "id":        str(r["id"]),
-                "node_name": r["node_name"],
-                "host":      r["host"],
-                "model":     r["model"],
-                "priority":  r["priority"],
-                "status":    r["status"],
-                "roles":     json.loads(r["roles"]) if isinstance(r["roles"], str) else list(r["roles"] or []),
+                "id":         str(r["id"]),
+                "node_name":  r["node_name"],
+                "host":       r["host"],
+                "model":      r["model"],
+                "priority":   r["priority"],
+                "status":     r["status"],
+                "roles":      json.loads(r["roles"]) if isinstance(r["roles"], str) else list(r["roles"] or []),
+                "latency_ms": r["latency_ms"],
             }
             for r in rows
         ]
+
+    async def get_nodes_for_role_by_latency(self, role: str) -> list[dict[str, Any]]:
+        """
+        Return enabled Ollama nodes tagged with *role*, sorted by TTFT
+        (latency_ms ASC, NULLs last).  Used by the Auto-Promotion Protocol:
+        the fastest currently-responding node wins, regardless of static priority.
+        """
+        rows = await self.pool.fetch(
+            """
+            SELECT id, node_name, host, model, priority, status, roles, latency_ms
+            FROM node_registry
+            WHERE node_type = 'ollama'
+              AND enabled   = TRUE
+              AND roles @> $1::jsonb
+            ORDER BY latency_ms ASC NULLS LAST, priority ASC
+            """,
+            json.dumps([role]),
+        )
+        return [
+            {
+                "id":         str(r["id"]),
+                "node_name":  r["node_name"],
+                "host":       r["host"],
+                "model":      r["model"],
+                "priority":   r["priority"],
+                "status":     r["status"],
+                "roles":      json.loads(r["roles"]) if isinstance(r["roles"], str) else list(r["roles"] or []),
+                "latency_ms": r["latency_ms"],
+            }
+            for r in rows
+        ]
+
+    async def update_node_latency(
+        self, node_name: str, latency_ms: int
+    ) -> None:
+        """Record the latest TTFT benchmark result for a node."""
+        await self.pool.execute(
+            """
+            UPDATE node_registry
+            SET latency_ms          = $1,
+                latency_measured_at = NOW(),
+                updated_at          = NOW()
+            WHERE node_name = $2
+            """,
+            latency_ms, node_name,
+        )
 
     # ── System Settings ────────────────────────────────────────────────────────
 
