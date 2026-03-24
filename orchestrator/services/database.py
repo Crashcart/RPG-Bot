@@ -567,7 +567,7 @@ class DatabaseService:
         rows = await self.pool.fetch(
             """
             SELECT id, node_name, node_type, host, model, priority,
-                   enabled, status, last_seen, notes
+                   enabled, status, last_seen, notes, roles
             FROM node_registry
             ORDER BY priority, node_name
             """
@@ -584,6 +584,7 @@ class DatabaseService:
                 "status":    r["status"],
                 "last_seen": r["last_seen"].strftime("%Y-%m-%d %H:%M") if r["last_seen"] else "",
                 "notes":     r["notes"] or "",
+                "roles":     json.loads(r["roles"]) if isinstance(r["roles"], str) else list(r["roles"] or []),
             }
             for r in rows
         ]
@@ -591,7 +592,7 @@ class DatabaseService:
     async def get_enabled_ollama_nodes(self) -> list[dict[str, Any]]:
         rows = await self.pool.fetch(
             """
-            SELECT id, node_name, host, model, priority, status
+            SELECT id, node_name, host, model, priority, status, roles
             FROM node_registry
             WHERE node_type = 'ollama' AND enabled = TRUE
             ORDER BY priority
@@ -605,9 +606,65 @@ class DatabaseService:
                 "model":     r["model"],
                 "priority":  r["priority"],
                 "status":    r["status"],
+                "roles":     json.loads(r["roles"]) if isinstance(r["roles"], str) else list(r["roles"] or []),
             }
             for r in rows
         ]
+
+    async def get_nodes_for_role(self, role: str) -> list[dict[str, Any]]:
+        """Return enabled Ollama nodes that carry the given capability tag,
+        sorted by ascending priority (best first)."""
+        rows = await self.pool.fetch(
+            """
+            SELECT id, node_name, host, model, priority, status, roles
+            FROM node_registry
+            WHERE node_type = 'ollama'
+              AND enabled   = TRUE
+              AND roles @> $1::jsonb
+            ORDER BY priority
+            """,
+            json.dumps([role]),
+        )
+        return [
+            {
+                "id":        str(r["id"]),
+                "node_name": r["node_name"],
+                "host":      r["host"],
+                "model":     r["model"],
+                "priority":  r["priority"],
+                "status":    r["status"],
+                "roles":     json.loads(r["roles"]) if isinstance(r["roles"], str) else list(r["roles"] or []),
+            }
+            for r in rows
+        ]
+
+    # ── System Settings ────────────────────────────────────────────────────────
+
+    async def get_system_setting(self, key: str, default: Any = None) -> Any:
+        """Fetch a global system setting by key. Returns parsed Python value."""
+        row = await self.pool.fetchrow(
+            "SELECT value FROM system_settings WHERE key = $1", key
+        )
+        if not row:
+            return default
+        raw = row["value"]
+        if isinstance(raw, str):
+            return json.loads(raw)
+        # asyncpg returns JSONB as a native Python type already
+        return raw
+
+    async def set_system_setting(self, key: str, value: Any) -> None:
+        """Upsert a global system setting."""
+        await self.pool.execute(
+            """
+            INSERT INTO system_settings (key, value)
+            VALUES ($1, $2)
+            ON CONFLICT (key) DO UPDATE
+                SET value = EXCLUDED.value, updated_at = NOW()
+            """,
+            key,
+            json.dumps(value),
+        )
 
     async def upsert_node(
         self,
@@ -617,21 +674,24 @@ class DatabaseService:
         model: str,
         priority: int,
         notes: str = "",
+        roles: list[str] | None = None,
     ) -> None:
         await self.pool.execute(
             """
             INSERT INTO node_registry
-                (node_name, node_type, host, model, priority, notes, enabled, status)
-            VALUES ($1, $2, $3, $4, $5, $6, TRUE, 'unknown')
+                (node_name, node_type, host, model, priority, notes, roles, enabled, status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, 'unknown')
             ON CONFLICT (node_name) DO UPDATE
                 SET node_type  = EXCLUDED.node_type,
                     host       = EXCLUDED.host,
                     model      = EXCLUDED.model,
                     priority   = EXCLUDED.priority,
                     notes      = EXCLUDED.notes,
+                    roles      = EXCLUDED.roles,
                     updated_at = NOW()
             """,
             node_name, node_type, host, model, priority, notes,
+            json.dumps(roles or []),
         )
 
     async def update_node_status(

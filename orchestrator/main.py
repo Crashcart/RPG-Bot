@@ -63,9 +63,9 @@ pdf_processor = PDFProcessorService(
 
 # Pipeline phase singletons
 ingestion    = IngestionPhase(db, rag)
-adjudication = AdjudicationPhase(node_router)  # uses NodeRouter, not bare OllamaClient
+adjudication = AdjudicationPhase(node_router)  # NodeRouter picks best available node
 state_commit = StateCommitPhase(db, cache)
-narration    = NarrationPhase(gemini, story_memory)
+narration    = NarrationPhase(gemini, story_memory, node_router)  # storyteller toggle
 
 
 @asynccontextmanager

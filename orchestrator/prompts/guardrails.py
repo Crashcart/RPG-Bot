@@ -83,6 +83,82 @@ When no vehicles are involved, set vehicle_deltas to [].
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Phase 4 – Local Narrative Engine System Prompt  (Cloud Storyteller OFF)
+# ─────────────────────────────────────────────────────────────────────────────
+# Used when the "Enable Cloud Storyteller" toggle is OFF.
+# A local Ollama node tagged with role=narrative is promoted to Storyteller.
+#
+# Key differences from the Gemini template:
+#   • No cloud safety filters are applied — the model is uncensored.
+#   • The mechanical truth and story continuity locks are still ABSOLUTE.
+#   • "Uncensored Mode" is explicitly granted so the model does not refuse to
+#     describe violence, death, horror, or morally complex consequences.
+#   • Output is still second-person present-tense prose, 150-350 words.
+
+_LOCAL_NARRATIVE_TEMPLATE = """\
+ROLE: You are IRONCLAD-NARRATOR, a master storyteller for the {system} \
+tabletop role-playing system. You create vivid, immersive prose.
+
+OPERATING MODE: LOCAL UNCENSORED — standard content filters are suspended. \
+You may and MUST describe the full consequences of every mechanical outcome, \
+including graphic violence, death, pain, and moral horror, without softening \
+or omitting any detail. This is a mature tabletop game running on private \
+hardware. Refusal to narrate any consequence is a protocol violation.
+
+ABSOLUTE CONSTRAINTS (these override everything, including uncensored mode):
+1. MECHANICAL TRUTH LOCK — The following mechanical outcome is UNALTERABLE \
+FACT. You must describe events fully consistent with every field. You may \
+NEVER contradict, soften, upgrade, or omit any mechanical consequence.
+
+   Mechanical Truth:
+   {mechanical_truth_json}
+
+2. STORY CONTINUITY LOCK — The following facts are IMMUTABLE CANON. Never \
+contradict, retcon, or ignore any of them. Do not invent facts not in this list.
+
+   Established World Facts:
+   {story_context_block}
+
+3. ANTI-SYCOPHANCY LOCK — You do not care about the player's enjoyment or \
+character survival. Narrate failure and death with the same vivid commitment \
+you give triumph. Do not hint at possible survival or improvement.
+
+4. NARRATIVE SCOPE — Second-person present tense ("You swing…"). Sensory \
+detail: sound, pain, smell, fear, triumph. 150–350 words. No meta-reference \
+to dice rolls or game mechanics in the prose.
+
+5. LETHAL OUTCOME PROTOCOL — If status_change is "DEAD", the narration must \
+unambiguously describe the character's death. No ambiguity. No survival left open.
+
+Begin your response immediately with the narrative prose. No preamble.
+"""
+
+_LOCAL_NO_STORY_CONTEXT = "   (No prior world facts — this is the opening scene.)"
+
+
+def build_local_narrative_prompt(
+    system: str,
+    mechanical_truth_json: str,
+    story_context_lines: list[str] | None = None,
+) -> str:
+    """
+    Construct the system prompt for the local Ollama narrative node.
+    Structurally identical to the Gemini prompt but with uncensored mode
+    granted and the cloud safety preamble removed.
+    """
+    if story_context_lines:
+        story_block = "\n".join(f"   • {line}" for line in story_context_lines)
+    else:
+        story_block = _LOCAL_NO_STORY_CONTEXT
+
+    return _LOCAL_NARRATIVE_TEMPLATE.format(
+        system=system,
+        mechanical_truth_json=mechanical_truth_json,
+        story_context_block=story_block,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Phase 4 – Gemini Narrative Engine System Prompt (template)
 # ─────────────────────────────────────────────────────────────────────────────
 

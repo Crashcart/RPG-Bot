@@ -1,21 +1,36 @@
 """
 Ironclad GM – AI Node Router
 ==============================
-Implements the "Hybrid AI Mesh" described in the Ollama Intel spec.
+Implements the "Hybrid AI Mesh" role-based routing architecture.
 
-The NodeRouter maintains a live registry of all available AI backends:
-  • Multiple local Ollama instances (Mini PC, Synology, etc.)
-  • The Gemini cloud API (always available as the "Storyteller" fallback)
+Routing Strategy
+----------------
+Every incoming task carries a *role* label (e.g. "adjudication", "narrative",
+"scribe", "vision").  The router finds the highest-priority enabled Ollama node
+that has been tagged with that role.  If no role-tagged node is available, it
+falls back to the standard priority-ordered list, then finally to the
+env-configured default node.
 
-On every adjudication request it selects the best available Ollama node by:
-  1. Sorting enabled Ollama nodes by ascending priority
-  2. Skipping nodes whose last known status is 'offline'
-  3. Falling back to the next candidate on connection failure
-  4. Falling back to the env-configured default if the DB registry is empty
+Role → Task Mapping
+-------------------
+  adjudication  Phase 2  – mechanical resolution (default for all nodes)
+  narrative     Phase 4  – local storyteller (active when Cloud Storyteller OFF)
+  scribe        Phase 4b – fact extraction / lore DB writing
+  vision        future   – OCR / image analysis
+  code_gen      future   – code generation tasks
 
-A background health-check task probes each registered Ollama node every
-30 seconds via GET /api/tags and writes the result back to node_registry.
-This keeps the Live Node Status dashboard current without blocking requests.
+Storyteller Toggle
+------------------
+The operator can flip "storyteller_api_enabled" in system_settings at runtime
+via the White Portal.  The router exposes `is_storyteller_enabled()` which
+reads the DB so the NarrationPhase can decide whether to call Gemini or promote
+a local narrative node.
+
+Health Loop
+-----------
+A background task probes every registered Ollama node via GET /api/tags every
+30 seconds and writes status + last_seen to the node_registry table, keeping
+the Live Node Status dashboard current.
 """
 
 from __future__ import annotations
@@ -37,16 +52,30 @@ logger = logging.getLogger(__name__)
 _HEALTH_INTERVAL_SECONDS = 30
 _PROBE_TIMEOUT_SECONDS   = 5
 
+# Roles considered acceptable as generic adjudication nodes when no specific
+# role match exists (any node without roles still fills this).
+_ADJUDICATION_FALLBACK = "adjudication"
+
 
 class NodeRouter:
     """
-    Selects the best available Ollama node for a mechanical adjudication call.
+    Routes AI tasks to the best available node based on capability tags.
 
     Usage:
         router = NodeRouter(db, settings)
-        await router.start()                         # begin background health loop
-        client = await router.get_ollama_client()    # use in adjudication phase
-        await router.stop()                          # on shutdown
+        await router.start()
+
+        # Role-based (specific capability required)
+        client = await router.get_ollama_client_for_role("narrative")
+
+        # Generic (any available node)
+        client = await router.get_ollama_client()
+
+        # Storyteller toggle
+        if await router.is_storyteller_enabled():
+            ...use Gemini...
+
+        await router.stop()
     """
 
     def __init__(self, db: "DatabaseService", settings: "Settings") -> None:
@@ -57,9 +86,7 @@ class NodeRouter:
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Start the background health-check loop."""
-        # Run an immediate probe so the UI shows live status on first page load
-        asyncio.create_task(self._check_all_nodes())
+        asyncio.create_task(self._check_all_nodes())   # immediate probe on startup
         self._task = asyncio.create_task(self._health_loop())
         logger.info("NodeRouter started — health loop every %ds.", _HEALTH_INTERVAL_SECONDS)
 
@@ -71,30 +98,61 @@ class NodeRouter:
             except asyncio.CancelledError:
                 pass
 
-    # ── Node Selection ────────────────────────────────────────────────────────
+    # ── System Settings ───────────────────────────────────────────────────────
 
-    async def get_ollama_client(self) -> "OllamaClient":
+    async def is_storyteller_enabled(self) -> bool:
+        """Return True if the Cloud Storyteller (Gemini) is enabled."""
+        val = await self._db.get_system_setting("storyteller_api_enabled", default=True)
+        return bool(val)
+
+    # ── Role-Based Client Selection ───────────────────────────────────────────
+
+    async def get_ollama_client_for_role(self, role: str) -> "OllamaClient | None":
         """
-        Return an OllamaClient pointed at the highest-priority online node.
-        Falls back gracefully to the next candidate, then to the env default.
+        Return the highest-priority online Ollama node tagged with *role*.
+        Returns None if no suitable node is found (caller should fall back or
+        raise an appropriate error).
         """
-        # Lazy import avoids circular dependency
         from orchestrator.services.ollama_client import OllamaClient
 
-        nodes = await self._db.get_enabled_ollama_nodes()
-        for node in nodes:  # already sorted by priority ASC in the DB query
+        nodes = await self._db.get_nodes_for_role(role)
+        for node in nodes:
             if node["status"] == "offline":
                 continue
             logger.debug(
-                "NodeRouter: selecting node '%s' (%s) priority=%d",
-                node["node_name"], node["host"], node["priority"],
+                "NodeRouter[role=%s]: selected node '%s' (priority=%d)",
+                role, node["node_name"], node["priority"],
             )
             return OllamaClient.from_node(node, self._settings)
 
-        # Nothing in DB — fall back to env-configured default
-        logger.warning(
-            "NodeRouter: no enabled Ollama nodes in registry, using env default."
-        )
+        logger.warning("NodeRouter: no online node found for role '%s'.", role)
+        return None
+
+    async def get_ollama_client(self) -> "OllamaClient":
+        """
+        Return the highest-priority online node (regardless of role tags).
+        Nodes explicitly tagged 'adjudication' are preferred first; then any
+        node sorted by priority; then the env-configured default.
+        """
+        from orchestrator.services.ollama_client import OllamaClient
+
+        # 1. Try adjudication-tagged nodes first
+        client = await self.get_ollama_client_for_role(_ADJUDICATION_FALLBACK)
+        if client:
+            return client
+
+        # 2. Fall back to any enabled online node
+        nodes = await self._db.get_enabled_ollama_nodes()
+        for node in nodes:
+            if node["status"] != "offline":
+                logger.debug(
+                    "NodeRouter[generic]: selected node '%s' (priority=%d)",
+                    node["node_name"], node["priority"],
+                )
+                return OllamaClient.from_node(node, self._settings)
+
+        # 3. Last resort: env-configured default
+        logger.warning("NodeRouter: no enabled nodes in registry, using env default.")
         return OllamaClient(self._settings)
 
     # ── Health Loop ───────────────────────────────────────────────────────────
@@ -122,7 +180,6 @@ class NodeRouter:
 
     @staticmethod
     async def _probe_node(host: str) -> str:
-        """GET /api/tags — Ollama's health / model list endpoint."""
         try:
             async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT_SECONDS) as client:
                 r = await client.get(f"{host}/api/tags")

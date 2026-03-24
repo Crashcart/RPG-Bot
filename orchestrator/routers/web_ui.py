@@ -211,13 +211,27 @@ async def lore_delete(
 async def nodes_page(request: Request):
     db    = _db(request)
     nodes = await db.get_all_nodes()
+    storyteller_enabled = await db.get_system_setting("storyteller_api_enabled", default=True)
     return _tmpl(request).TemplateResponse("nodes.html", {
-        "request": request,
-        "page":    "nodes",
-        "nodes":   nodes,
-        "flash_ok":  request.session.pop("flash_ok", ""),
+        "request":             request,
+        "page":                "nodes",
+        "nodes":               nodes,
+        "storyteller_enabled": bool(storyteller_enabled),
+        "flash_ok":  request.session.pop("flash_ok",  ""),
         "flash_err": request.session.pop("flash_err", ""),
     })
+
+
+@router.post("/nodes/storyteller-toggle", response_class=RedirectResponse)
+async def nodes_storyteller_toggle(request: Request):
+    """Flip the Cloud Storyteller (Gemini) on/off."""
+    db = _db(request)
+    current = await db.get_system_setting("storyteller_api_enabled", default=True)
+    new_val = not bool(current)
+    await db.set_system_setting("storyteller_api_enabled", new_val)
+    label = "enabled" if new_val else "disabled (local fallback active)"
+    request.session["flash_ok"] = f"Cloud Storyteller {label}."
+    return RedirectResponse("/web/nodes", status_code=303)
 
 
 @router.post("/nodes/add", response_class=RedirectResponse)
@@ -228,9 +242,12 @@ async def nodes_add(
     host:      str = Form(...),
     model:     str = Form(""),
     priority:  int = Form(10),
+    roles:     str = Form(""),   # comma-separated, e.g. "adjudication,narrative"
     notes:     str = Form(""),
 ):
     db = _db(request)
+    # Parse roles: split on comma, strip whitespace, drop empties
+    role_list = [r.strip().lower() for r in roles.split(",") if r.strip()]
     try:
         await db.upsert_node(
             node_name=node_name.strip(),
@@ -239,6 +256,7 @@ async def nodes_add(
             model=model.strip(),
             priority=priority,
             notes=notes.strip(),
+            roles=role_list,
         )
         request.session["flash_ok"] = f"Node '{node_name}' saved."
     except Exception as exc:

@@ -10,16 +10,23 @@ import re
 import httpx
 
 from orchestrator.config import Settings
-from orchestrator.prompts.guardrails import MECHANICAL_SYSTEM_PROMPT
+from orchestrator.prompts.guardrails import (
+    MECHANICAL_SYSTEM_PROMPT,
+    build_local_narrative_prompt,
+)
 from orchestrator.schemas.payloads import (
     ActionOutcome,
     CharacterSnapshot,
     ContextAssemblyPayload,
     DiceRequest,
+    MechanicalTruth,
+    NarrativeRequestPayload,
+    NarrativeResponsePayload,
     OllamaResolutionPayload,
     OperationalStatus,
     StateDelta,
     StatDelta,
+    StoryFact,
     SubsystemDelta,
     VehicleDelta,
 )
@@ -217,4 +224,85 @@ class OllamaClient:
             state_delta=delta,
             rulebook_citations=d.get("rulebook_citations", []),
             reasoning=d.get("reasoning", ""),
+        )
+
+    # ── Local Narrative Generation ─────────────────────────────────────────────
+
+    async def generate_narrative(
+        self, request: NarrativeRequestPayload
+    ) -> NarrativeResponsePayload:
+        """
+        Generate narrative prose using this local Ollama node.
+
+        Called when the Cloud Storyteller (Gemini) is toggled OFF and this node
+        carries the 'narrative' role.  Uses the LOCAL_NARRATIVE_SYSTEM_PROMPT
+        which grants uncensored mode while still enforcing the mechanical truth
+        and story continuity locks.
+
+        The output is free-form text — no JSON schema is applied.
+        """
+        truth = request.mechanical_truth
+
+        # Build the mechanical truth block Ollama must honour
+        mechanical_truth_json = json.dumps({
+            "action_type":        truth.action_type,
+            "difficulty":         truth.difficulty,
+            "dice_notation":      truth.dice_notation,
+            "roll_result":        truth.roll_result,
+            "outcome":            truth.outcome.value,
+            "stat_changes":       [s.model_dump() for s in truth.stat_changes],
+            "status_change":      truth.status_change.value if truth.status_change else None,
+            "rulebook_citations": truth.rulebook_citations,
+        }, indent=2)
+
+        # Build story context lines
+        story_lines = [
+            f"[{f.entity_type.value}] {f.entity_name}: {f.summary}"
+            for f in request.story_context
+        ]
+
+        system_prompt = build_local_narrative_prompt(
+            system=request.campaign_system,
+            mechanical_truth_json=mechanical_truth_json,
+            story_context_lines=story_lines or None,
+        )
+
+        user_message = (
+            f"Character: {request.character_context.name}\n"
+            f"Player action: {request.player_intent}\n\n"
+            "Generate the narrative now."
+        )
+
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.post(
+                f"{self._base_url}/api/chat",
+                json={
+                    "model":  self._model,
+                    "stream": False,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user",   "content": user_message},
+                    ],
+                    # No "format": "json" — we want free-form prose
+                },
+            )
+            response.raise_for_status()
+
+        raw       = response.json()
+        narrative = raw["message"]["content"].strip()
+
+        # Derive a short embed title from the first sentence (≤ 60 chars)
+        first_sentence = narrative.split(".")[0].strip()
+        embed_title    = first_sentence[:60] + ("…" if len(first_sentence) > 60 else "")
+
+        logger.info(
+            "Local narrative generated: %d chars, node=%s",
+            len(narrative), self._base_url,
+        )
+
+        return NarrativeResponsePayload(
+            prompt_id=request.prompt_id,
+            intent_id=request.intent_id,
+            narrative=narrative,
+            embed_title=embed_title,
         )
