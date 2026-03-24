@@ -387,17 +387,116 @@ class MultimediaCue(BaseModel):
     label:      str = ""
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Task 4 — Living Discord Immersion Layer Schemas
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ThreadEvent(str, Enum):
+    """
+    Signals whether the Discord bot should manage an ephemeral combat thread.
+
+    COMBAT  – A combat action occurred this turn.  The bot opens a new thread
+              if none is open for this channel, or posts to the existing one.
+    CLOSE   – The encounter has ended.  The bot posts a summary and archives
+              the thread.
+    """
+    COMBAT = "combat"
+    CLOSE  = "close"
+
+
+class TTSCue(BaseModel):
+    """
+    A text-to-speech audio cue for Discord voice channel playback.
+
+    Generated for every npc_dialogue sub-agent result.  The Discord bot
+    uses edge-tts with the specified voice_id to generate audio and plays
+    it sequentially in the voice channel after ambient audio starts.
+    """
+    entity_name: str  = Field(..., description="NPC name or source label")
+    text:        str  = Field(..., description="Dialogue text to speak aloud")
+    voice_id:    str  = Field(
+        default="en-US-GuyNeural",
+        description="edge-tts voice name — tied to the Ollama node that generated this dialogue",
+    )
+    node_name:   str  = Field(default="unknown", description="Originating sub-agent node")
+
+
+class ChannelDirective(BaseModel):
+    """
+    Instruction for the Discord bot to manipulate a player's channel access.
+
+    Emitted when the narrative warrants a physical location change —
+    the player is captured, escapes, is rescued, etc.
+
+    action options:
+      "move_to"  – grant read-only access to channel_key, restrict current channel
+      "restore"  – restore full access to the main game channel
+    """
+    action:      str = Field(..., description="move_to | restore")
+    channel_key: str = Field(
+        ...,
+        description="Semantic key for the target channel: dungeon | prison | hospital | main",
+    )
+    reason:      str = Field(default="", description="Short explanation for audit logs")
+
+
 class NarrativeResponsePayload(BaseModel):
     """
     Phase 4 output – the final payload sent to Discord.
-    Contains the narrative text and any triggered multimedia cues.
+
+    Core fields (prompt_id, intent_id, narrative, embed_title) are unchanged.
+    Task 4 fields carry the Living Discord immersion layer instructions.
+    The Discord bot reads each field independently; all Task 4 fields are
+    optional so older bot versions degrade gracefully.
     """
     prompt_id:     str
     intent_id:     str
-    narrative:     str  = Field(..., description="Full narrative text from Gemini")
+    narrative:     str  = Field(..., description="Full narrative prose — posted to main channel")
     embed_title:   str  = Field(default="", description="Short Discord embed title")
     multimedia:    list[MultimediaCue] = Field(default_factory=list)
-    generated_at:  datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    # ── Task 4: Paranoia Whisper (Private Perception) ─────────────────────
+    whisper: str | None = Field(
+        default=None,
+        description="Secret GM insight DMed to the player — what their skeptical eye notices "
+                    "that no one else in the scene would catch. 2-3 sentences.",
+    )
+
+    # ── Task 4: Ghost Sheet / Ephemeral Thread ────────────────────────────
+    thread_event:   ThreadEvent | None = Field(
+        default=None,
+        description="If set, the bot manages a combat/encounter thread on this message.",
+    )
+    thread_title:   str = Field(
+        default="Encounter Details",
+        description="Thread name, e.g. 'Combat – Thug Alley'",
+    )
+    thread_content: str | None = Field(
+        default=None,
+        description="Mechanical grit posted inside the thread: dice rolls, damage, "
+                    "inventory changes, rulebook citations. Never shown in main channel.",
+    )
+
+    # ── Task 4: Voice Channel Puppeteering ────────────────────────────────
+    ambient_audio_key: str | None = Field(
+        default=None,
+        description="Key for the ambient audio file to loop in the voice channel "
+                    "(e.g. 'tavern_chatter', 'dungeon_ambience', 'combat_tension').",
+    )
+    tts_cues: list[TTSCue] = Field(
+        default_factory=list,
+        description="Ordered list of NPC dialogue cues to speak aloud via TTS, "
+                    "each with its Ollama node's unique voice profile.",
+    )
+
+    # ── Task 4: Channel Manipulation ─────────────────────────────────────
+    channel_directive: ChannelDirective | None = Field(
+        default=None,
+        description="If set, the bot moves the player's Discord channel access — "
+                    "into the dungeon, prison, hospital, or back to main.",
+    )
+
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -442,6 +541,10 @@ class SubAgentResult(BaseModel):
     task:            SubAgentTask
     raw_output:      str             = Field(..., description="Uncensored raw text from the sub-agent node")
     node_name:       str             = Field(default="unknown", description="Which Ollama node handled this task")
+    voice_id:        str             = Field(
+        default="en-US-GuyNeural",
+        description="edge-tts voice name for this node — carried into TTSCue for voice channel playback",
+    )
     ttft_ms:         int | None      = Field(default=None, description="Time-to-first-token in ms for this task")
     brand_violation: bool            = Field(
         default=False,

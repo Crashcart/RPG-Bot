@@ -56,6 +56,7 @@ class OllamaClient:
         self._model     = settings.ollama_model
         self._timeout   = settings.ollama_timeout_seconds
         self._node_name = "env-default"
+        self._voice_id  = "en-US-GuyNeural"  # default TTS voice
 
     @classmethod
     def from_node(cls, node: dict, settings: Settings) -> "OllamaClient":
@@ -65,6 +66,7 @@ class OllamaClient:
         obj._model     = node["model"] or settings.ollama_model
         obj._timeout   = settings.ollama_timeout_seconds
         obj._node_name = node.get("node_name", "unknown")
+        obj._voice_id  = node.get("voice_id", "en-US-GuyNeural")  # TTS voice profile
         return obj
 
     # ── Generic text generation (used by GMDirector and SubAgentDispatcher) ──

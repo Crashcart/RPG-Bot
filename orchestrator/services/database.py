@@ -619,7 +619,8 @@ class DatabaseService:
         sorted by ascending priority (best first)."""
         rows = await self.pool.fetch(
             """
-            SELECT id, node_name, host, model, priority, status, roles, latency_ms
+            SELECT id, node_name, host, model, priority, status, roles,
+                   latency_ms, voice_id
             FROM node_registry
             WHERE node_type = 'ollama'
               AND enabled   = TRUE
@@ -638,6 +639,7 @@ class DatabaseService:
                 "status":     r["status"],
                 "roles":      json.loads(r["roles"]) if isinstance(r["roles"], str) else list(r["roles"] or []),
                 "latency_ms": r["latency_ms"],
+                "voice_id":   r["voice_id"] or "en-US-GuyNeural",
             }
             for r in rows
         ]
@@ -650,7 +652,8 @@ class DatabaseService:
         """
         rows = await self.pool.fetch(
             """
-            SELECT id, node_name, host, model, priority, status, roles, latency_ms
+            SELECT id, node_name, host, model, priority, status, roles,
+                   latency_ms, voice_id
             FROM node_registry
             WHERE node_type = 'ollama'
               AND enabled   = TRUE
@@ -669,6 +672,7 @@ class DatabaseService:
                 "status":     r["status"],
                 "roles":      json.loads(r["roles"]) if isinstance(r["roles"], str) else list(r["roles"] or []),
                 "latency_ms": r["latency_ms"],
+                "voice_id":   r["voice_id"] or "en-US-GuyNeural",
             }
             for r in rows
         ]

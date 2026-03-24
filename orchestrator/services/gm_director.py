@@ -65,6 +65,8 @@ if TYPE_CHECKING:
     from orchestrator.services.story_memory   import StoryMemoryService
     from orchestrator.services.sub_agent_dispatcher import SubAgentDispatcher
 
+import asyncio
+
 from orchestrator.prompts.gm_prompts import (
     GM_PLANNING_PROMPT,
     GM_PLANNING_SYSTEM_PROMPT,
@@ -73,10 +75,22 @@ from orchestrator.prompts.gm_prompts import (
     GM_SYSTEM_PROMPT,
     STRUCTURAL_PATTERNS,
 )
+from orchestrator.prompts.immersion_prompts import (
+    AMBIENT_AUDIO_MAP,
+    WHISPER_PROMPT,
+    WHISPER_SYSTEM_PROMPT,
+    build_thread_content,
+    detect_channel_directive,
+    is_combat_action,
+    is_combat_end,
+)
 from orchestrator.schemas.payloads import (
     ActionOutcome,
+    ChannelDirective,
     CharacterSnapshot,
     GMPlanResult,
+    ThreadEvent,
+    TTSCue,
     NarrativeResponsePayload,
     OllamaResolutionPayload,
     StateCommitPayload,
@@ -87,6 +101,7 @@ logger = logging.getLogger(__name__)
 
 _PLANNING_MAX_TOKENS  = 1024
 _SYNTHESIS_MAX_TOKENS = 900
+_WHISPER_MAX_TOKENS   = 120   # 2-3 tight sentences
 _MAX_STORY_FACTS      = 5
 
 
@@ -166,7 +181,7 @@ class GMDirector:
 
         assembled_elements = _format_assembled_elements(sub_results)
 
-        # ── Step 4c: Synthesis Pass ────────────────────────────────────────────
+        # ── Step 4c: Synthesis Pass + Whisper (concurrent) ────────────────────
         mech_context = _format_mechanical_context(resolution)
         stat_block   = _build_stat_change_block(resolution)
         story_block  = (
@@ -189,11 +204,19 @@ class GMDirector:
             stat_change_block=stat_block,
         )
 
-        raw_narrative = await storyteller.generate(
+        # Fire synthesis and whisper concurrently — whisper adds zero latency
+        has_npc_tasks = any(r.task.task_type == "npc_dialogue" for r in sub_results)
+        synthesis_coro = storyteller.generate(
             system_prompt=GM_SYSTEM_PROMPT,
             user_prompt=synthesis_prompt,
             max_tokens=_SYNTHESIS_MAX_TOKENS,
         )
+        whisper_coro = (
+            self._generate_whisper(storyteller, resolution, plan, sub_results, player_intent)
+            if has_npc_tasks else asyncio.sleep(0, result=None)
+        )
+
+        raw_narrative, whisper_text = await asyncio.gather(synthesis_coro, whisper_coro)
 
         # ── Step 4d: Structural Text Filter ───────────────────────────────────
         final_narrative, stripped_count = _strip_structural_text(raw_narrative)
@@ -214,18 +237,37 @@ class GMDirector:
         except Exception as exc:
             logger.warning("GM Director: fact extraction failed (best-effort): %s", exc)
 
+        # ── Task 4: Living Discord Immersion fields ────────────────────────────
+        tts_cues      = _build_tts_cues(sub_results)
+        thread_ev, thread_title, thread_body = _build_thread_event(resolution, character.name)
+        ambient_key   = _infer_ambient_audio_key(resolution)
+        ch_action, ch_key = detect_channel_directive(
+            resolution.action_type,
+            resolution.reasoning,
+            resolution.outcome.value,
+        )
+        channel_directive = (
+            ChannelDirective(action=ch_action, channel_key=ch_key,
+                             reason=f"Narrative event: {resolution.action_type}")
+            if ch_action else None
+        )
+
         # ── Build response ─────────────────────────────────────────────────────
         outcome_label = resolution.outcome.value.replace("_", " ").title()
         embed_title   = f"{character.name}: {outcome_label}"
         first_sentence = final_narrative.split(".")[0].strip()
-        if len(first_sentence) > 12:  # only override default if we got real prose
+        if len(first_sentence) > 12:
             embed_title = first_sentence[:60] + ("…" if len(first_sentence) > 60 else "")
 
         logger.info(
-            "GM Director complete: storyteller=%s sub_agents=%d narrative=%d chars lethal=%s",
+            "GM Director complete: storyteller=%s sub_agents=%d narrative=%d chars "
+            "whisper=%s tts_cues=%d thread=%s lethal=%s",
             storyteller_name,
             len(plan.sub_tasks),
             len(final_narrative),
+            "yes" if whisper_text else "no",
+            len(tts_cues),
+            thread_ev.value if thread_ev else "none",
             commit.lethal,
         )
 
@@ -234,7 +276,52 @@ class GMDirector:
             intent_id=resolution.intent_id,
             narrative=final_narrative,
             embed_title=embed_title,
+            whisper=whisper_text or None,
+            thread_event=thread_ev,
+            thread_title=thread_title,
+            thread_content=thread_body,
+            ambient_audio_key=ambient_key,
+            tts_cues=tts_cues,
+            channel_directive=channel_directive,
         )
+
+    # ── Private: Whisper Generation ───────────────────────────────────────────
+
+    async def _generate_whisper(
+        self,
+        storyteller,
+        resolution:    OllamaResolutionPayload,
+        plan:          GMPlanResult,
+        sub_results,
+        player_intent: str,
+    ) -> str | None:
+        """
+        Generate the secret private-perception DM whisper in parallel with synthesis.
+
+        Fires only when NPC dialogue sub-tasks are present.  A failed whisper
+        silently returns None — the main narrative is unaffected.
+        """
+        npc_names = ", ".join(
+            r.task.entity_name for r in sub_results
+            if r.task.task_type == "npc_dialogue"
+        )
+        outcome_str = f"{resolution.outcome.value}: {resolution.reasoning[:80] or ''}"
+
+        whisper_prompt = WHISPER_PROMPT.format(
+            narrative_summary=player_intent[:200],
+            npc_list=npc_names or "unspecified NPC",
+            mechanical_outcome=outcome_str,
+        )
+        try:
+            text = await storyteller.generate(
+                system_prompt=WHISPER_SYSTEM_PROMPT,
+                user_prompt=whisper_prompt,
+                max_tokens=_WHISPER_MAX_TOKENS,
+            )
+            return text.strip() if text and len(text.strip()) > 10 else None
+        except Exception as exc:
+            logger.debug("Whisper generation failed (non-fatal): %s", exc)
+            return None
 
     # ── Private: Storyteller Selection ────────────────────────────────────────
 
@@ -464,3 +551,71 @@ def _strip_structural_text(text: str) -> tuple[str, int]:
     # Collapse multiple blank lines left behind by stripping
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     return text, stripped
+
+
+# ── Task 4 Helper Functions ────────────────────────────────────────────────────
+
+def _build_tts_cues(sub_results) -> list[TTSCue]:
+    """
+    Convert npc_dialogue sub-agent results into ordered TTSCue objects.
+
+    Each cue carries the voice_id of the Ollama node that generated the
+    dialogue, giving each "Actor" node a persistent vocal persona.
+    """
+    cues: list[TTSCue] = []
+    for r in sub_results:
+        if r.task.task_type != "npc_dialogue" or not r.raw_output:
+            continue
+        cues.append(TTSCue(
+            entity_name=r.task.entity_name,
+            text=r.raw_output,
+            voice_id=r.voice_id,
+            node_name=r.node_name,
+        ))
+    return cues
+
+
+def _build_thread_event(
+    resolution: OllamaResolutionPayload,
+    character_name: str,
+) -> tuple[ThreadEvent | None, str, str | None]:
+    """
+    Determine whether a Discord combat thread should be opened, updated,
+    or closed, and build the thread content block.
+
+    Returns (thread_event, thread_title, thread_content).
+    """
+    if is_combat_end(
+        resolution.action_type,
+        resolution.reasoning,
+        resolution.state_delta.status_change,
+    ):
+        content = build_thread_content(resolution, character_name)
+        title   = f"Combat – {resolution.action_type.replace('_', ' ').title()}"
+        return ThreadEvent.CLOSE, title, content
+
+    if is_combat_action(resolution.action_type):
+        content = build_thread_content(resolution, character_name)
+        title   = f"Combat – {resolution.action_type.replace('_', ' ').title()}"
+        return ThreadEvent.COMBAT, title, content
+
+    return None, "Encounter Details", None
+
+
+def _infer_ambient_audio_key(resolution: OllamaResolutionPayload) -> str | None:
+    """
+    Map the inferred environment type to an ambient audio key.
+
+    Returns None if no audio change is warranted (e.g. a stationary social
+    scene in a known location — the existing ambient loop continues).
+    """
+    action = resolution.action_type.lower()
+    if any(k in action for k in ("attack", "combat", "fight", "strike", "shoot")):
+        return AMBIENT_AUDIO_MAP.get("combat encounter")
+    if any(k in action for k in ("speak", "talk", "persuade", "intimidate", "ask")):
+        return AMBIENT_AUDIO_MAP.get("social interaction")
+    if any(k in action for k in ("sneak", "hide", "stealth", "search", "investigate")):
+        return AMBIENT_AUDIO_MAP.get("exploration/stealth")
+    if any(k in action for k in ("craft", "repair", "build", "create")):
+        return AMBIENT_AUDIO_MAP.get("crafting/downtime")
+    return None

@@ -128,6 +128,7 @@ class SubAgentDispatcher:
             client = await self._node_router.get_ollama_client()
 
         node_name = getattr(client, "_node_name", "unknown")
+        voice_id  = getattr(client, "_voice_id",  "en-US-GuyNeural")
 
         prompt_template = SUBAGENT_PROMPT_TEMPLATES.get(
             task.task_type, SUBAGENT_PROMPT_TEMPLATES["npc_dialogue"]
@@ -170,6 +171,7 @@ class SubAgentDispatcher:
                     task=task,
                     raw_output=raw_output,
                     node_name=node_name,
+                    voice_id=voice_id,
                     ttft_ms=ttft_ms,
                     brand_violation=False,
                 )
@@ -198,6 +200,7 @@ class SubAgentDispatcher:
             task=task,
             raw_output=_strip_brand_violations(raw_output),
             node_name=node_name,
+            voice_id=voice_id,
             ttft_ms=ttft_ms,
             brand_violation=True,
         )
