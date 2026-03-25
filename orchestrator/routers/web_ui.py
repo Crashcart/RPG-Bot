@@ -58,6 +58,9 @@ def _pdf_processor(request: Request):
 def _backchannel(request: Request):
     return getattr(request.app.state, "backchannel", None)
 
+def _telemetry(request: Request):
+    return getattr(request.app.state, "telemetry", None)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Dashboard
@@ -437,3 +440,19 @@ async def backchannel_cancel(request: Request, directive_id: str):
         return JSONResponse({"ok": False, "error": "service unavailable"}, status_code=503)
     await bc.cancel_directive(directive_id)
     return JSONResponse({"ok": True})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Live Telemetry Terminal
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/telemetry", response_class=HTMLResponse)
+async def telemetry_page(request: Request):
+    telem = _telemetry(request)
+    return _tmpl(request).TemplateResponse("telemetry.html", {
+        "request":      request,
+        "page":         "telemetry",
+        "client_count": telem.client_count if telem else 0,
+        "flash_ok":  request.session.pop("flash_ok",  ""),
+        "flash_err": request.session.pop("flash_err", ""),
+    })

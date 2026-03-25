@@ -12,16 +12,20 @@ FastAPI application that drives the four-phase pipeline:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.sessions import SessionMiddleware
+from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
 
 from orchestrator.config import get_settings
 from orchestrator.pipeline import (
@@ -30,7 +34,7 @@ from orchestrator.pipeline import (
     NarrationPhase,
     StateCommitPhase,
 )
-from orchestrator.routers import web_router
+from orchestrator.routers import auth_router, web_router
 from orchestrator.schemas.payloads import (
     CampfireStatus,
     DirectiveType,
@@ -49,6 +53,7 @@ from orchestrator.schemas.payloads import (
 )
 from orchestrator.services import (
     AdminBackchannelService,
+    AuthService,
     CacheService,
     CampfireService,
     ChronicleService,
@@ -62,6 +67,7 @@ from orchestrator.services import (
     RetconService,
     StoryMemoryService,
     SubAgentDispatcher,
+    TelemetryService,
 )
 from orchestrator.services.pdf_processor import PDFProcessorService
 
@@ -89,6 +95,10 @@ pdf_processor = PDFProcessorService(
 # Routes delegation tasks from the GM Director to actor/scribe Ollama nodes.
 sub_agent_dispatcher = SubAgentDispatcher(node_router)
 
+# ── Telemetry Service (no pool dependency — initialised immediately) ──────────
+# Must be created before GMDirector so it can be injected.
+telemetry_svc = TelemetryService()
+
 # ── Tier 1: GM Director (Central Storyteller) ─────────────────────────────────
 # Selects the storyteller per-turn (Gemini or auto-promoted Ollama), runs the
 # planning pass, dispatches sub-agents, synthesizes, and applies immersion filters.
@@ -97,6 +107,7 @@ gm_director = GMDirector(
     node_router=node_router,
     dispatcher=sub_agent_dispatcher,
     story_memory=story_memory,
+    telemetry=telemetry_svc,
 )
 
 # Pipeline phase singletons
@@ -107,11 +118,12 @@ narration    = NarrationPhase(gm_director)   # Phase 4 fully delegated to GMDire
 
 # ── Async Session Services (lazy-initialised in lifespan after pool is ready) ─
 # These are bound to db.pool after connect(); placeholders set to None here.
-chronicle:   ChronicleService       | None = None
-campfire:    CampfireService        | None = None
-downtime:    DowntimeService        | None = None
-retcon:      RetconService          | None = None
+chronicle:   ChronicleService        | None = None
+campfire:    CampfireService         | None = None
+downtime:    DowntimeService         | None = None
+retcon:      RetconService           | None = None
 backchannel: AdminBackchannelService | None = None
+auth:        AuthService             | None = None
 
 
 async def _downtime_resolver_loop() -> None:
@@ -138,15 +150,18 @@ async def lifespan(app: FastAPI):
     await node_router.start()   # begin background health-check loop
 
     # Initialise async-session services now that db.pool is live
-    global chronicle, campfire, downtime, retcon, backchannel
+    global chronicle, campfire, downtime, retcon, backchannel, auth
     chronicle   = ChronicleService(settings, db.pool)
     campfire    = CampfireService(settings, db.pool)
     downtime    = DowntimeService(settings, db.pool)
     retcon      = RetconService(db.pool)
     backchannel = AdminBackchannelService(db.pool)
+    auth        = AuthService(db.pool)
 
-    # Expose backchannel service to web router
+    # Expose services to web router and middleware
     app.state.backchannel = backchannel
+    app.state.telemetry   = telemetry_svc
+    app.state.auth        = auth
 
     # Start downtime background resolver
     resolver_task = asyncio.create_task(_downtime_resolver_loop())
@@ -164,6 +179,60 @@ async def lifespan(app: FastAPI):
     await cache.disconnect()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Auth Guard Middleware
+# ─────────────────────────────────────────────────────────────────────────────
+
+_OPEN_WEB_PATHS = {"/web/login", "/web/setup"}
+
+
+class AuthGuardMiddleware(BaseHTTPMiddleware):
+    """
+    Protect all /web/ routes behind session-based admin authentication.
+
+    Middleware stack ordering (added first = innermost = executes last):
+      AuthGuard → SessionMiddleware → CORSMiddleware → handler
+    So by the time AuthGuard.dispatch() runs, request.session is already
+    populated by SessionMiddleware.
+
+    First-Boot: if admin_accounts is empty → force redirect to /web/setup.
+    Normal: if session missing admin_id → redirect to /web/login.
+    The open paths (/web/login, /web/setup) bypass auth entirely.
+    """
+
+    def __init__(self, app) -> None:
+        super().__init__(app)
+        # Once we confirm setup is complete, skip is_first_boot() DB calls.
+        self._setup_done = False
+
+    async def dispatch(self, request: StarletteRequest, call_next):
+        path = request.url.path
+
+        # Only guard /web/ routes
+        if not path.startswith("/web/"):
+            return await call_next(request)
+
+        # Auth and setup pages are always open
+        if path in _OPEN_WEB_PATHS:
+            return await call_next(request)
+
+        auth_svc = getattr(request.app.state, "auth", None)
+
+        # First-boot check (cached after first successful login)
+        if not self._setup_done and auth_svc:
+            first_boot = await auth_svc.is_first_boot()
+            if first_boot:
+                return RedirectResponse("/web/setup", status_code=302)
+            self._setup_done = True
+
+        # Session auth check
+        if not request.session.get("admin_id"):
+            next_path = path
+            return RedirectResponse(f"/web/login?next={next_path}", status_code=302)
+
+        return await call_next(request)
+
+
 app = FastAPI(
     title="Ironclad GM Orchestrator",
     description="Four-phase TTRPG mechanical adjudication and narrative pipeline.",
@@ -171,6 +240,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Middleware stack (add_middleware builds LIFO — first added = innermost = executes last).
+# Desired request order: SessionMiddleware → CORSMiddleware → AuthGuard → handler
+# So add AuthGuard first (innermost), then CORS, then Session (outermost).
+app.add_middleware(AuthGuardMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # tighten in production
@@ -191,7 +264,8 @@ app.state.cache        = cache
 app.state.pdf_processor = pdf_processor
 app.state.node_router  = node_router
 
-app.include_router(web_router, prefix="/web")
+app.include_router(auth_router, prefix="/web")
+app.include_router(web_router,  prefix="/web")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -288,6 +362,12 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
                 directive_ids=[d.directive_id for d in active_directives],
                 intent_id=intent.intent_id,
             )
+            await telemetry_svc.emit(
+                "directive_fired",
+                count=len(active_directives),
+                campaign_id=campaign_id,
+                intent_id=intent.intent_id,
+            )
 
         # ── Persist audit log ─────────────────────────────────────────────────
         duration_ms = int((time.monotonic() - pipeline_start) * 1000)
@@ -308,6 +388,14 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
             intent.intent_id,
             duration_ms,
             resolution.outcome.value,
+        )
+
+        await telemetry_svc.emit(
+            "pipeline_complete",
+            intent_id=intent.intent_id,
+            duration_ms=duration_ms,
+            outcome=resolution.outcome.value,
+            campaign_id=campaign_id,
         )
 
         return narrative
@@ -580,6 +668,40 @@ async def api_cancel_directive(directive_id: str) -> dict:
         raise HTTPException(status_code=503, detail="Backchannel service not initialised.")
     await backchannel.cancel_directive(directive_id)
     return {"status": "ok", "directive_id": directive_id}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Live Telemetry WebSocket
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.websocket("/ws/telemetry")
+async def telemetry_websocket(websocket: WebSocket):
+    """
+    Real-time pipeline event stream for the White Portal telemetry terminal.
+    Requires an authenticated admin session (session cookie must be present).
+    Replays the last 200 events on connect, then streams live.
+    """
+    import asyncio
+
+    # Auth check — session cookie must carry admin_id
+    session = websocket.session if hasattr(websocket, "session") else {}
+    if not session.get("admin_id"):
+        await websocket.close(code=1008, reason="Unauthorized — admin session required")
+        return
+
+    if not telemetry_svc:
+        await websocket.close(code=1011, reason="Telemetry service unavailable")
+        return
+
+    q = await telemetry_svc.connect(websocket)
+    try:
+        while True:
+            event = await q.get()
+            await websocket.send_text(json.dumps(event))
+    except Exception:
+        pass
+    finally:
+        telemetry_svc.disconnect(q)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

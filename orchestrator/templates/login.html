@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login — Ironclad GM</title>
+  <style>
+    :root {
+      --bg: #0c0c12; --surface: #13131c; --border: #24243a;
+      --gold: #c9a84c; --text: #dddde6; --muted: #66667a;
+      --red: #cf4c5a; --radius: 6px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg); color: var(--text);
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      font-size: 14px; min-height: 100vh;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .auth-wrap { width: 100%; max-width: 380px; padding: 24px; }
+    .brand {
+      text-align: center; margin-bottom: 32px;
+      color: var(--gold); font-size: 22px; font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+    .brand .sigil { font-size: 34px; display: block; margin-bottom: 8px; }
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 28px;
+    }
+    h2 { font-size: 15px; font-weight: 700; margin-bottom: 20px; color: var(--text); }
+    .form-row { margin-bottom: 14px; }
+    label {
+      display: block; font-size: 11px; font-weight: 600; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 6px;
+    }
+    input[type="text"], input[type="password"] {
+      width: 100%; background: var(--bg); border: 1px solid var(--border);
+      color: var(--text); padding: 9px 12px; border-radius: var(--radius);
+      font-size: 13px; font-family: inherit; outline: none;
+      transition: border-color 0.15s;
+    }
+    input:focus { border-color: var(--gold); }
+    .btn {
+      width: 100%; padding: 10px; background: var(--gold); color: #0c0c12;
+      border: none; border-radius: var(--radius); font-size: 13px;
+      font-weight: 700; cursor: pointer; font-family: inherit;
+      transition: background 0.15s; margin-top: 8px;
+    }
+    .btn:hover { background: #d4b562; }
+    .error {
+      background: rgba(207,76,90,0.1); border: 1px solid rgba(207,76,90,0.3);
+      border-radius: var(--radius); padding: 10px 14px;
+      color: var(--red); font-size: 12px; margin-bottom: 16px;
+    }
+    .footer-note {
+      text-align: center; margin-top: 20px;
+      font-size: 11px; color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+<div class="auth-wrap">
+  <div class="brand">
+    <span class="sigil">⚔</span> White Portal
+  </div>
+
+  <div class="card">
+    <h2>Admin Login</h2>
+
+    {% if error %}
+    <div class="error">{{ error }}</div>
+    {% endif %}
+
+    <form method="post" action="/web/login">
+      <input type="hidden" name="next" value="{{ next }}">
+      <div class="form-row">
+        <label>Username</label>
+        <input type="text" name="username" autocomplete="username"
+               placeholder="admin username" required autofocus>
+      </div>
+      <div class="form-row">
+        <label>Password</label>
+        <input type="password" name="password" autocomplete="current-password"
+               placeholder="password" required>
+      </div>
+      <button type="submit" class="btn">Enter the Portal →</button>
+    </form>
+  </div>
+
+  <div class="footer-note">
+    Ironclad GM · White Portal · Admin access only
+  </div>
+</div>
+</body>
+</html>

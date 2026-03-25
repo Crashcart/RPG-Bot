@@ -12,6 +12,8 @@ from .campfire import CampfireService
 from .downtime import DowntimeService
 from .retcon import RetconService
 from .admin_backchannel import AdminBackchannelService
+from .auth import AuthService
+from .telemetry import TelemetryService
 
 __all__ = [
     "DatabaseService",
@@ -28,4 +30,6 @@ __all__ = [
     "DowntimeService",
     "RetconService",
     "AdminBackchannelService",
+    "AuthService",
+    "TelemetryService",
 ]

@@ -60,10 +60,11 @@ import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from orchestrator.services.gemini_client  import GeminiClient
-    from orchestrator.services.node_router    import NodeRouter
-    from orchestrator.services.story_memory   import StoryMemoryService
-    from orchestrator.services.sub_agent_dispatcher import SubAgentDispatcher
+    from orchestrator.services.gemini_client         import GeminiClient
+    from orchestrator.services.node_router           import NodeRouter
+    from orchestrator.services.story_memory          import StoryMemoryService
+    from orchestrator.services.sub_agent_dispatcher  import SubAgentDispatcher
+    from orchestrator.services.telemetry             import TelemetryService
 
 import asyncio
 
@@ -119,15 +120,17 @@ class GMDirector:
 
     def __init__(
         self,
-        gemini:      "GeminiClient",
-        node_router: "NodeRouter",
-        dispatcher:  "SubAgentDispatcher",
+        gemini:       "GeminiClient",
+        node_router:  "NodeRouter",
+        dispatcher:   "SubAgentDispatcher",
         story_memory: "StoryMemoryService",
+        telemetry:    "TelemetryService | None" = None,
     ) -> None:
         self._gemini       = gemini
         self._node_router  = node_router
         self._dispatcher   = dispatcher
         self._story_memory = story_memory
+        self._telemetry    = telemetry
 
     # ── Public Interface ───────────────────────────────────────────────────────
 
@@ -150,6 +153,13 @@ class GMDirector:
         storyteller = await self._select_storyteller()
         storyteller_name = getattr(storyteller, "_node_name", "gemini-cloud")
 
+        if self._telemetry:
+            await self._telemetry.emit(
+                "storyteller_selected",
+                storyteller=storyteller_name,
+                campaign_id=campaign_id,
+            )
+
         # ── Story Memory Retrieval ─────────────────────────────────────────────
         story_context = await self._story_memory.retrieve_relevant_context(
             query=player_intent,
@@ -171,8 +181,24 @@ class GMDirector:
             storyteller_name, len(plan.sub_tasks),
         )
 
+        if self._telemetry:
+            await self._telemetry.emit(
+                "planning_done",
+                sub_tasks=len(plan.sub_tasks),
+                direct_elements=len(plan.direct_elements),
+                storyteller=storyteller_name,
+            )
+
         # ── Step 4b: Sub-Agent Dispatch ────────────────────────────────────────
         sub_results = await self._dispatcher.dispatch_all(plan.sub_tasks)
+
+        if self._telemetry and plan.sub_tasks:
+            actor_names = ", ".join(t.entity_name for t in plan.sub_tasks[:5])
+            await self._telemetry.emit(
+                "sub_agent_dispatch",
+                count=len(plan.sub_tasks),
+                actors=actor_names,
+            )
 
         # Log any brand violations for operator review
         for r in sub_results:
@@ -212,6 +238,9 @@ class GMDirector:
         )
 
         # Fire synthesis and whisper concurrently — whisper adds zero latency
+        if self._telemetry:
+            await self._telemetry.emit("synthesis_start", storyteller=storyteller_name)
+
         has_npc_tasks = any(r.task.task_type == "npc_dialogue" for r in sub_results)
         synthesis_coro = storyteller.generate(
             system_prompt=GM_SYSTEM_PROMPT,
@@ -227,6 +256,15 @@ class GMDirector:
 
         # ── Step 4d: Structural Text Filter ───────────────────────────────────
         final_narrative, stripped_count = _strip_structural_text(raw_narrative)
+
+        if self._telemetry:
+            await self._telemetry.emit(
+                "synthesis_done",
+                length=len(final_narrative),
+                stripped=stripped_count,
+                storyteller=storyteller_name,
+            )
+
         if stripped_count:
             logger.warning(
                 "GM synthesis output contained %d structural pattern(s); stripped. "
