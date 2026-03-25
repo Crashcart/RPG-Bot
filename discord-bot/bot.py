@@ -121,6 +121,8 @@ class IroncladBot(commands.Bot):
 
     async def on_ready(self) -> None:
         logger.info("Ironclad GM online as %s", self.user)
+        # Ghost Continuity: deliver any narratives generated while bot was offline
+        asyncio.create_task(_ghost_continuity_sync())
 
 
 bot = IroncladBot()
@@ -722,15 +724,40 @@ async def on_message(message: discord.Message) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @bot.tree.command(name="act", description="Declare an in-character action.")
-@app_commands.describe(action="What does your character do?")
-async def slash_act(interaction: discord.Interaction, action: str) -> None:
+@app_commands.describe(
+    action="What does your character do?",
+    image="Optional image attachment for visual context (scene photo, map, etc.).",
+)
+async def slash_act(
+    interaction: discord.Interaction,
+    action: str,
+    image: discord.Attachment | None = None,
+) -> None:
     await interaction.response.defer()
     try:
+        raw_input = action
+
+        # Visual Intel: if an image is attached, get Gemini's description first
+        if image and image.content_type and image.content_type.startswith("image/"):
+            try:
+                async with bot.http as client:
+                    vis_resp = await client.post(
+                        f"{ORCHESTRATOR_URL}/api/vision/analyse",
+                        json={"image_url": image.url, "prompt": action},
+                        timeout=30,
+                    )
+                if vis_resp.status_code == 200:
+                    visual_desc = vis_resp.json().get("description", "")
+                    if visual_desc:
+                        raw_input = f"[Visual context: {visual_desc}]\n\n{action}"
+            except Exception as vis_exc:
+                logger.warning("Visual intel failed: %s", vis_exc)
+
         data = await _dispatch_intent(
             player_id=str(interaction.user.id),
             guild_id=str(interaction.guild_id or "DM"),
             channel_id=str(interaction.channel_id),
-            raw_input=action,
+            raw_input=raw_input,
             command_type="slash_command",
             slash_data={"command_name": "act", "options": {"action": action}},
         )
@@ -765,6 +792,12 @@ async def slash_act(interaction: discord.Interaction, action: str) -> None:
         if data.get("channel_directive") and isinstance(interaction.user, discord.Member) and interaction.guild:
             asyncio.create_task(
                 _handle_channel_directive(interaction.user, interaction.guild, data["channel_directive"])
+            )
+
+        # Ghost Continuity: mark this intent delivered so it won't be re-sent on reconnect
+        if data.get("intent_id"):
+            asyncio.create_task(
+                _mark_narrative_delivered(data["intent_id"], str(interaction.guild_id or "DM"))
             )
 
     except httpx.HTTPStatusError as exc:
@@ -1115,6 +1148,163 @@ async def slash_retcon(
     ).set_footer(text=f"Retcon by {interaction.user.display_name}")
 
     await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ghost Continuity
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _mark_narrative_delivered(intent_id: str, guild_id: str) -> None:
+    """Fire-and-forget: tell the orchestrator a pending narrative was delivered."""
+    try:
+        async with bot.http as client:
+            await client.post(
+                f"{ORCHESTRATOR_URL}/api/narrative/{intent_id}/delivered",
+                json={"guild_id": guild_id},
+                timeout=10,
+            )
+    except Exception as exc:
+        logger.warning("Could not mark narrative %s delivered: %s", intent_id, exc)
+
+
+async def _ghost_continuity_sync() -> None:
+    """On bot (re)connect, fetch and deliver any narratives that were generated
+    while the bot was offline, then mark each one delivered."""
+    await bot.wait_until_ready()
+    for guild in bot.guilds:
+        guild_id = str(guild.id)
+        try:
+            async with bot.http as client:
+                resp = await client.get(
+                    f"{ORCHESTRATOR_URL}/api/narrative/pending/{guild_id}",
+                    timeout=15,
+                )
+            if resp.status_code != 200:
+                continue
+            pending: list[dict] = resp.json().get("pending", [])
+        except Exception as exc:
+            logger.warning("Ghost continuity fetch failed for guild %s: %s", guild_id, exc)
+            continue
+
+        for item in pending:
+            intent_id  = item.get("intent_id", "")
+            channel_id = item.get("channel_id")
+            narrative  = item.get("narrative", "")
+            if not (intent_id and channel_id and narrative):
+                continue
+
+            channel = guild.get_channel(int(channel_id))
+            if channel is None:
+                continue
+
+            try:
+                embed = discord.Embed(
+                    title="📜 Missed Narrative",
+                    description=narrative[:4000],
+                    colour=0x9F6FE0,
+                ).set_footer(text="Delivered via Ghost Continuity")
+                await channel.send(embed=embed)
+                asyncio.create_task(_mark_narrative_delivered(intent_id, guild_id))
+            except Exception as exc:
+                logger.warning("Ghost delivery failed for %s: %s", intent_id, exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Player Sandbox Commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="do", description="Describe a physical action your character performs.")
+@app_commands.describe(action="The physical action your character takes.")
+async def slash_do(interaction: discord.Interaction, action: str) -> None:
+    await interaction.response.defer()
+    try:
+        data = await _dispatch_intent(
+            player_id=str(interaction.user.id),
+            guild_id=str(interaction.guild_id or "DM"),
+            channel_id=str(interaction.channel_id),
+            raw_input=f"My character physically does: {action}",
+            command_type="slash_command",
+            slash_data={"command_name": "do", "options": {"action": action}},
+        )
+        embed = _build_action_embed(data, interaction.user)
+        sent_msg = await interaction.followup.send(embed=embed, wait=True)
+
+        if data.get("whisper"):
+            asyncio.create_task(_send_whisper_dm(interaction.user, data["whisper"]))
+
+        if data.get("thread_event") and data.get("thread_content") and interaction.guild:
+            asyncio.create_task(_handle_combat_thread(
+                sent_msg=sent_msg,
+                guild=interaction.guild,
+                channel_id=interaction.channel_id,
+                thread_event=data["thread_event"],
+                thread_title=data.get("thread_title", "Action Details"),
+                thread_content=data["thread_content"],
+            ))
+
+        if isinstance(interaction.user, discord.Member) and interaction.guild and data.get("channel_directive"):
+            asyncio.create_task(
+                _handle_channel_directive(interaction.user, interaction.guild, data["channel_directive"])
+            )
+    except Exception as exc:
+        logger.exception("Slash /do failed: %s", exc)
+        await interaction.followup.send("⚠️ Internal error. Please try again.")
+
+
+@bot.tree.command(name="say", description="Speak in-character as your character.")
+@app_commands.describe(words="The words your character speaks aloud.")
+async def slash_say(interaction: discord.Interaction, words: str) -> None:
+    await interaction.response.defer()
+    try:
+        data = await _dispatch_intent(
+            player_id=str(interaction.user.id),
+            guild_id=str(interaction.guild_id or "DM"),
+            channel_id=str(interaction.channel_id),
+            raw_input=f'My character says: "{words}"',
+            command_type="slash_command",
+            slash_data={"command_name": "say", "options": {"words": words}},
+        )
+        embed = _build_action_embed(data, interaction.user)
+        await interaction.followup.send(embed=embed)
+
+        if data.get("whisper"):
+            asyncio.create_task(_send_whisper_dm(interaction.user, data["whisper"]))
+
+        if isinstance(interaction.user, discord.Member) and data.get("tts_cues"):
+            asyncio.create_task(
+                bot.voice_mgr.handle_turn_audio(
+                    interaction.user, None, data.get("tts_cues", [])
+                )
+            )
+    except Exception as exc:
+        logger.exception("Slash /say failed: %s", exc)
+        await interaction.followup.send("⚠️ Internal error. Please try again.")
+
+
+@bot.tree.command(name="insight", description="Attempt a perception or insight check on something.")
+@app_commands.describe(target="What are you trying to perceive or understand?")
+async def slash_insight(interaction: discord.Interaction, target: str) -> None:
+    await interaction.response.defer(ephemeral=True)
+    try:
+        data = await _dispatch_intent(
+            player_id=str(interaction.user.id),
+            guild_id=str(interaction.guild_id or "DM"),
+            channel_id=str(interaction.channel_id),
+            raw_input=f"I attempt an insight/perception check on: {target}",
+            command_type="slash_command",
+            slash_data={"command_name": "insight", "options": {"target": target}},
+        )
+        embed = _build_action_embed(data, interaction.user)
+        embed.title = f"🔍 Insight: {target[:60]}"
+        embed.set_footer(text="Only you can see this result.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+        # Private whisper for deep secrets
+        if data.get("whisper"):
+            asyncio.create_task(_send_whisper_dm(interaction.user, data["whisper"]))
+    except Exception as exc:
+        logger.exception("Slash /insight failed: %s", exc)
+        await interaction.followup.send("⚠️ Internal error. Please try again.", ephemeral=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

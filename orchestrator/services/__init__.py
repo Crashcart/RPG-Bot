@@ -14,6 +14,9 @@ from .retcon import RetconService
 from .admin_backchannel import AdminBackchannelService
 from .auth import AuthService
 from .telemetry import TelemetryService
+from .web_search import WebSearchService
+from .sandbox import SandboxService
+from .disk_agent import DiskAgentService
 
 __all__ = [
     "DatabaseService",
@@ -32,4 +35,7 @@ __all__ = [
     "AdminBackchannelService",
     "AuthService",
     "TelemetryService",
+    "WebSearchService",
+    "SandboxService",
+    "DiskAgentService",
 ]

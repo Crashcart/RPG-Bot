@@ -58,6 +58,7 @@ from orchestrator.services import (
     CampfireService,
     ChronicleService,
     DatabaseService,
+    DiskAgentService,
     DowntimeService,
     GeminiClient,
     GMDirector,
@@ -65,9 +66,11 @@ from orchestrator.services import (
     OllamaClient,
     RAGService,
     RetconService,
+    SandboxService,
     StoryMemoryService,
     SubAgentDispatcher,
     TelemetryService,
+    WebSearchService,
 )
 from orchestrator.services.pdf_processor import PDFProcessorService
 
@@ -99,6 +102,12 @@ sub_agent_dispatcher = SubAgentDispatcher(node_router)
 # Must be created before GMDirector so it can be injected.
 telemetry_svc = TelemetryService()
 
+# ── Web Search Service ────────────────────────────────────────────────────────
+web_search = WebSearchService(settings)
+
+# ── Disk Agent Service ────────────────────────────────────────────────────────
+disk_agent = DiskAgentService(settings.world_data_dir)
+
 # ── Tier 1: GM Director (Central Storyteller) ─────────────────────────────────
 # Selects the storyteller per-turn (Gemini or auto-promoted Ollama), runs the
 # planning pass, dispatches sub-agents, synthesizes, and applies immersion filters.
@@ -124,6 +133,7 @@ downtime:    DowntimeService         | None = None
 retcon:      RetconService           | None = None
 backchannel: AdminBackchannelService | None = None
 auth:        AuthService             | None = None
+sandbox:     SandboxService          | None = None
 
 
 async def _downtime_resolver_loop() -> None:
@@ -150,13 +160,19 @@ async def lifespan(app: FastAPI):
     await node_router.start()   # begin background health-check loop
 
     # Initialise async-session services now that db.pool is live
-    global chronicle, campfire, downtime, retcon, backchannel, auth
+    global chronicle, campfire, downtime, retcon, backchannel, auth, sandbox
     chronicle   = ChronicleService(settings, db.pool)
     campfire    = CampfireService(settings, db.pool)
     downtime    = DowntimeService(settings, db.pool)
     retcon      = RetconService(db.pool)
     backchannel = AdminBackchannelService(db.pool)
     auth        = AuthService(db.pool)
+    sandbox     = SandboxService(
+        gemini=gemini,
+        node_router=node_router,
+        story_memory=story_memory,
+        web_search=web_search,
+    )
 
     # Expose services to web router and middleware
     app.state.backchannel = backchannel
@@ -397,6 +413,23 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
             outcome=resolution.outcome.value,
             campaign_id=campaign_id,
         )
+
+        # ── Ghost Continuity: cache for offline Discord bot delivery ──────────
+        # Key expires in 1 hour; bot marks delivered via /api/narrative/delivered
+        try:
+            ghost_key = f"ghost:{intent.guild_id}:{intent.intent_id}"
+            ghost_data = json.dumps({
+                "intent_id":   intent.intent_id,
+                "guild_id":    intent.guild_id,
+                "channel_id":  intent.channel_id,
+                "player_id":   intent.player_id,
+                "narrative":   narrative.narrative,
+                "embed_title": narrative.embed_title,
+                "outcome":     resolution.outcome.value,
+            })
+            await cache._redis.set(ghost_key, ghost_data, ex=3600)
+        except Exception as ghost_exc:
+            logger.debug("Ghost Continuity cache write failed (non-fatal): %s", ghost_exc)
 
         return narrative
 
@@ -668,6 +701,196 @@ async def api_cancel_directive(directive_id: str) -> dict:
         raise HTTPException(status_code=503, detail="Backchannel service not initialised.")
     await backchannel.cancel_directive(directive_id)
     return {"status": "ok", "directive_id": directive_id}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GM Sandbox Chat API  (White Portal private testing interface)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/sandbox/chat", summary="Direct GM Engine / NPC chat (sandbox — no state changes)")
+async def api_sandbox_chat(req: dict) -> dict:
+    """
+    Send a message directly to the GM Engine or a specific NPC persona.
+    Supports optional web search grounding and image URL injection.
+    No player state is modified.
+    """
+    if not sandbox:
+        raise HTTPException(status_code=503, detail="Sandbox service not initialised.")
+    try:
+        return await sandbox.chat(
+            message=req.get("message", ""),
+            campaign_id=req.get("campaign_id") or "",
+            persona=req.get("persona") or None,
+            use_search=bool(req.get("use_search", False)),
+            image_url=req.get("image_url") or None,
+        )
+    except Exception as exc:
+        logger.exception("Sandbox chat failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/sandbox/upload-image", summary="Upload an image for sandbox visual analysis")
+async def api_sandbox_upload_image(file: UploadFile = File(...)) -> dict:
+    """
+    Accept an image upload, save it to the PDF upload directory (reusing the
+    same storage), and return a temporary URL the sandbox can pass to
+    generate_with_image().
+    """
+    import uuid as _uuid
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Only image files are accepted.")
+    contents = await file.read()
+    if len(contents) > 20 * 1024 * 1024:  # 20 MB cap
+        raise HTTPException(status_code=413, detail="Image exceeds 20 MB limit.")
+    ext = file.filename.rsplit(".", 1)[-1].lower() if file.filename and "." in file.filename else "jpg"
+    img_id   = str(_uuid.uuid4())
+    img_path = _pdf_upload_dir / f"{img_id}.{ext}"
+    img_path.write_bytes(contents)
+    return {"url": f"/api/sandbox/image/{img_id}.{ext}", "id": img_id}
+
+
+@app.get("/api/sandbox/image/{filename}", summary="Serve an uploaded sandbox image")
+async def api_sandbox_image(filename: str):
+    """Serve a previously uploaded sandbox image for Gemini Vision analysis."""
+    from fastapi.responses import FileResponse
+    img_path = _pdf_upload_dir / filename
+    if not img_path.exists() or ".." in filename:
+        raise HTTPException(status_code=404, detail="Image not found.")
+    return FileResponse(str(img_path))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Web Intel API  (standalone search endpoint)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/search", summary="Run a web search for GM fact-grounding")
+async def api_web_search(q: str, max_results: int = 5) -> list[dict]:
+    """Run a web search via WebSearchService and return structured results."""
+    if not q.strip():
+        return []
+    return await web_search.search(q.strip(), max_results=min(max_results, 10))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Disk Agency API  (AI world artifact file system)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/disk/{campaign_id}/write", summary="Write a world artifact file (AI sandbox)")
+async def api_disk_write(campaign_id: str, req: dict) -> dict:
+    path    = req.get("path", "")
+    content = req.get("content", "")
+    if not path or not content:
+        raise HTTPException(status_code=400, detail="path and content required.")
+    try:
+        return await disk_agent.write(campaign_id, path, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/disk/{campaign_id}/read", summary="Read a world artifact file")
+async def api_disk_read(campaign_id: str, path: str) -> dict:
+    try:
+        content = await disk_agent.read(campaign_id, path)
+        return {"path": path, "content": content}
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/disk/{campaign_id}/list", summary="List world artifact files for a campaign")
+async def api_disk_list(campaign_id: str, subdir: str = "") -> list[dict]:
+    try:
+        return await disk_agent.list_files(campaign_id, subdir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.delete("/api/disk/{campaign_id}/file", summary="Delete a world artifact file")
+async def api_disk_delete(campaign_id: str, path: str) -> dict:
+    try:
+        deleted = await disk_agent.delete(campaign_id, path)
+        return {"deleted": deleted, "path": path}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Visual Intel API  (image analysis via Gemini Vision)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/vision/analyse", summary="Analyse an image URL using Gemini Vision")
+async def api_vision_analyse(req: dict) -> dict:
+    """
+    Analyse an image and return a rich textual description.
+    Used by the Discord bot when a player attaches an image to /act.
+    """
+    image_url = req.get("image_url", "")
+    context   = req.get("context", "Describe this image for a tabletop RPG Game Master.")
+    if not image_url:
+        raise HTTPException(status_code=400, detail="image_url required.")
+    try:
+        description = await gemini.generate_with_image(
+            system_prompt=(
+                "You are the visual intel module for an RPG Game Master. "
+                "Describe the image in vivid, atmosphere-rich detail. "
+                "Focus on narrative-relevant details: people, objects, environment, mood. "
+                "Be concise — 2-4 sentences."
+            ),
+            user_prompt=context,
+            image_url=image_url,
+            max_tokens=200,
+        )
+        return {"description": description, "image_url": image_url}
+    except Exception as exc:
+        logger.exception("Vision analysis failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ghost Continuity API  (Discord bot reconnect narrative delivery)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get(
+    "/api/narrative/pending/{guild_id}",
+    summary="Ghost Continuity: get any undelivered narratives for a guild",
+)
+async def api_pending_narratives(guild_id: str) -> list[dict]:
+    """
+    Called by the Discord bot on_ready to retrieve narratives that were
+    generated while the bot was offline.  Returns up to 10 undelivered items.
+    """
+    import json as _json
+    items = []
+    try:
+        # Scan Redis for keys matching the ghost continuity pattern
+        pattern = f"ghost:{guild_id}:*"
+        keys = await cache._redis.keys(pattern)
+        for key in keys[:10]:
+            raw = await cache._redis.get(key)
+            if raw:
+                try:
+                    items.append(_json.loads(raw))
+                except Exception:
+                    pass
+    except Exception as exc:
+        logger.warning("Ghost Continuity: pending fetch failed: %s", exc)
+    return items
+
+
+@app.post(
+    "/api/narrative/{intent_id}/delivered",
+    summary="Ghost Continuity: mark a narrative as delivered",
+    status_code=200,
+)
+async def api_mark_narrative_delivered(intent_id: str, guild_id: str) -> dict:
+    """Mark a ghost-continuity narrative as delivered so it is not re-sent."""
+    try:
+        key = f"ghost:{guild_id}:{intent_id}"
+        await cache._redis.delete(key)
+    except Exception as exc:
+        logger.warning("Ghost Continuity: mark-delivered failed: %s", exc)
+    return {"status": "ok", "intent_id": intent_id}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

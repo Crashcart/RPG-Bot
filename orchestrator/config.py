@@ -54,6 +54,15 @@ class Settings(BaseSettings):
     # ── Media Proxy ───────────────────────────────────────────────────────────
     media_proxy_url: str = "http://media-asset-proxy:8001"
 
+    # ── Web Search (optional — DuckDuckGo used as free fallback) ─────────────
+    # Set SERPAPI_KEY for full web results via SerpAPI, or leave blank for
+    # DuckDuckGo Instant Answers (no key required).
+    serpapi_key: str = ""
+
+    # ── Disk Agency (AI file sandbox) ─────────────────────────────────────────
+    # Directory the GM AI can write world artifacts to (maps, session notes…)
+    world_data_dir: str = "/app/world_data"
+
     # ── App ───────────────────────────────────────────────────────────────────
     log_level:          str = "INFO"
     session_secret_key: str = "change-me-to-a-long-random-string"

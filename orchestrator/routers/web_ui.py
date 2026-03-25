@@ -456,3 +456,20 @@ async def telemetry_page(request: Request):
         "flash_ok":  request.session.pop("flash_ok",  ""),
         "flash_err": request.session.pop("flash_err", ""),
     })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GM Sandbox Chat
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/sandbox", response_class=HTMLResponse)
+async def sandbox_page(request: Request):
+    db        = _db(request)
+    campaigns = await db.get_all_campaigns()
+    return _tmpl(request).TemplateResponse("sandbox.html", {
+        "request":   request,
+        "page":      "sandbox",
+        "campaigns": campaigns,
+        "flash_ok":  request.session.pop("flash_ok",  ""),
+        "flash_err": request.session.pop("flash_err", ""),
+    })
