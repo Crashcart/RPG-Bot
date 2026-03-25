@@ -7,6 +7,10 @@ from .rag_service import RAGService
 from .story_memory import StoryMemoryService
 from .sub_agent_dispatcher import SubAgentDispatcher
 from .gm_director import GMDirector
+from .chronicle import ChronicleService
+from .campfire import CampfireService
+from .downtime import DowntimeService
+from .retcon import RetconService
 
 __all__ = [
     "DatabaseService",
@@ -18,4 +22,8 @@ __all__ = [
     "StoryMemoryService",
     "SubAgentDispatcher",
     "GMDirector",
+    "ChronicleService",
+    "CampfireService",
+    "DowntimeService",
+    "RetconService",
 ]

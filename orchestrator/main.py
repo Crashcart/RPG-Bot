@@ -31,15 +31,31 @@ from orchestrator.pipeline import (
     StateCommitPhase,
 )
 from orchestrator.routers import web_router
-from orchestrator.schemas.payloads import IntentPayload, NarrativeResponsePayload, PipelineResult
+from orchestrator.schemas.payloads import (
+    CampfireStatus,
+    DowntimeSubmitRequest,
+    DowntimeTaskStatus,
+    IntentPayload,
+    NarrativeResponsePayload,
+    PipelineResult,
+    PresenceUpdate,
+    RecapRequest,
+    RecapResponse,
+    RetconRequest,
+    RetconResponse,
+)
 from orchestrator.services import (
     CacheService,
+    CampfireService,
+    ChronicleService,
     DatabaseService,
+    DowntimeService,
     GeminiClient,
     GMDirector,
     NodeRouter,
     OllamaClient,
     RAGService,
+    RetconService,
     StoryMemoryService,
     SubAgentDispatcher,
 )
@@ -85,17 +101,55 @@ adjudication = AdjudicationPhase(node_router)
 state_commit = StateCommitPhase(db, cache)
 narration    = NarrationPhase(gm_director)   # Phase 4 fully delegated to GMDirector
 
+# ── Async Session Services (lazy-initialised in lifespan after pool is ready) ─
+# These are bound to db.pool after connect(); placeholders set to None here.
+chronicle: ChronicleService | None = None
+campfire:  CampfireService  | None = None
+downtime:  DowntimeService  | None = None
+retcon:    RetconService     | None = None
+
+
+async def _downtime_resolver_loop() -> None:
+    """Background task: checks for overdue downtime tasks every 60 seconds."""
+    import asyncio
+    while True:
+        await asyncio.sleep(60)
+        try:
+            if downtime:
+                await downtime.resolve_pending()
+        except Exception as exc:
+            logger.error("Downtime resolver loop error: %s", exc)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
+
     logger.info("Starting Ironclad GM Orchestrator…")
     await db.connect()
     await cache.connect()
     await rag.connect()
     await story_memory.connect(db.pool)
     await node_router.start()   # begin background health-check loop
+
+    # Initialise async-session services now that db.pool is live
+    global chronicle, campfire, downtime, retcon
+    chronicle = ChronicleService(settings, db.pool)
+    campfire  = CampfireService(settings, db.pool)
+    downtime  = DowntimeService(settings, db.pool)
+    retcon    = RetconService(db.pool)
+
+    # Start downtime background resolver
+    resolver_task = asyncio.create_task(_downtime_resolver_loop())
+
     yield
+
     logger.info("Shutting down Ironclad GM Orchestrator…")
+    resolver_task.cancel()
+    try:
+        await resolver_task
+    except asyncio.CancelledError:
+        pass
     await node_router.stop()
     await db.disconnect()
     await cache.disconnect()
@@ -161,6 +215,35 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"No active campaign found for guild {intent.guild_id}.",
+            )
+
+        # ── Campfire Mode Guard ────────────────────────────────────────────────
+        # When key players are offline, deflect critical plot advances and
+        # suggest downtime RP instead.  Soft-block: we still generate a
+        # narrative, but the GM signals that the story clock is paused.
+        if campfire and await campfire.is_campfire_active(intent.guild_id):
+            cf_status = await campfire.get_status(intent.guild_id)
+            absent_list = ", ".join(f"<@{p}>" for p in cf_status.absent_players[:3])
+            return NarrativeResponsePayload(
+                prompt_id=intent.intent_id,
+                intent_id=intent.intent_id,
+                narrative=(
+                    "🔥 **Campfire Mode**\n\n"
+                    "The fire crackles low. The story holds its breath.\n\n"
+                    f"*{absent_list} {'is' if len(cf_status.absent_players) == 1 else 'are'} "
+                    "currently away — the GM is pausing the main narrative clock "
+                    "until the full party is present.*\n\n"
+                    "**What you can do now:**\n"
+                    "• Talk to each other around the fire (free RP — no dice, no consequences)\n"
+                    "• Use `/downtime` to assign your character a background task\n"
+                    "• Use `/recap` when your party-member returns to catch them up\n\n"
+                    "_The story resumes the moment everyone is back._"
+                ),
+                embed_title="🔥 Campfire Mode — Story Paused",
+                whisper=(
+                    "Your instincts say now is not the time to push forward. "
+                    "Wait for your allies."
+                ),
             )
         campaign_id = campaign["id"]
         campaign_system = campaign["system"]
@@ -304,6 +387,127 @@ async def api_active_campaign(guild_id: str) -> dict:
     if not campaign:
         raise HTTPException(status_code=404, detail=f"No active campaign for guild {guild_id}.")
     return campaign
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Chronicle Recap API
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post(
+    "/api/recap",
+    response_model=RecapResponse,
+    summary="Generate a 'Previously on…' catch-up recap for an offline player",
+)
+async def api_recap(req: RecapRequest) -> RecapResponse:
+    if not chronicle:
+        raise HTTPException(status_code=503, detail="Chronicle service not initialised.")
+    try:
+        return await chronicle.generate_recap(req)
+    except Exception as exc:
+        logger.exception("Recap generation failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Presence / Campfire Mode API
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post(
+    "/api/presence",
+    response_model=CampfireStatus,
+    summary="Update a player's online/offline presence and recalculate campfire mode",
+)
+async def api_update_presence(update: PresenceUpdate) -> CampfireStatus:
+    if not campfire:
+        raise HTTPException(status_code=503, detail="Campfire service not initialised.")
+    return await campfire.update_presence(update.player_id, update.guild_id, update.online)
+
+
+@app.get(
+    "/api/campfire/{guild_id}",
+    response_model=CampfireStatus,
+    summary="Get current campfire mode status for a guild",
+)
+async def api_campfire_status(guild_id: str) -> CampfireStatus:
+    if not campfire:
+        raise HTTPException(status_code=503, detail="Campfire service not initialised.")
+    return await campfire.get_status(guild_id)
+
+
+@app.post(
+    "/api/campfire/{guild_id}/off",
+    summary="Admin: manually disable campfire mode",
+    status_code=200,
+)
+async def api_campfire_off(guild_id: str) -> dict:
+    if not campfire:
+        raise HTTPException(status_code=503, detail="Campfire service not initialised.")
+    await campfire.force_campfire_off(guild_id)
+    return {"status": "ok", "campfire_active": False}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Downtime Tasks API
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post(
+    "/api/downtime",
+    response_model=DowntimeTaskStatus,
+    summary="Submit an async downtime task for a player",
+    status_code=201,
+)
+async def api_submit_downtime(req: DowntimeSubmitRequest) -> DowntimeTaskStatus:
+    if not downtime:
+        raise HTTPException(status_code=503, detail="Downtime service not initialised.")
+    try:
+        return await downtime.submit_task(req)
+    except Exception as exc:
+        logger.exception("Downtime submit failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get(
+    "/api/downtime/notifications/{player_id}",
+    summary="Poll for completed downtime task notifications (Discord bot polls this)",
+)
+async def api_downtime_notifications(player_id: str) -> list[dict]:
+    if not downtime:
+        raise HTTPException(status_code=503, detail="Downtime service not initialised.")
+    notifications = await downtime.get_pending_notifications(player_id)
+    return [n.model_dump() for n in notifications]
+
+
+@app.patch(
+    "/api/downtime/{task_id}/notified",
+    summary="Mark a downtime task notification as delivered",
+    status_code=200,
+)
+async def api_mark_notified(task_id: str) -> dict:
+    if not downtime:
+        raise HTTPException(status_code=503, detail="Downtime service not initialised.")
+    await downtime.mark_notified(task_id)
+    return {"status": "ok", "task_id": task_id}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Retcon API
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post(
+    "/api/retcon",
+    response_model=RetconResponse,
+    summary="Admin: roll back a specific action and restore pre-action character state",
+)
+async def api_retcon(req: RetconRequest) -> RetconResponse:
+    if not retcon:
+        raise HTTPException(status_code=503, detail="Retcon service not initialised.")
+    try:
+        return await retcon.apply_retcon(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Retcon failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
