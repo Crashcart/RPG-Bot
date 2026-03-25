@@ -33,8 +33,11 @@ from orchestrator.pipeline import (
 from orchestrator.routers import web_router
 from orchestrator.schemas.payloads import (
     CampfireStatus,
+    DirectiveType,
     DowntimeSubmitRequest,
     DowntimeTaskStatus,
+    GMDirective,
+    GMDirectiveRequest,
     IntentPayload,
     NarrativeResponsePayload,
     PipelineResult,
@@ -45,6 +48,7 @@ from orchestrator.schemas.payloads import (
     RetconResponse,
 )
 from orchestrator.services import (
+    AdminBackchannelService,
     CacheService,
     CampfireService,
     ChronicleService,
@@ -103,10 +107,11 @@ narration    = NarrationPhase(gm_director)   # Phase 4 fully delegated to GMDire
 
 # ── Async Session Services (lazy-initialised in lifespan after pool is ready) ─
 # These are bound to db.pool after connect(); placeholders set to None here.
-chronicle: ChronicleService | None = None
-campfire:  CampfireService  | None = None
-downtime:  DowntimeService  | None = None
-retcon:    RetconService     | None = None
+chronicle:   ChronicleService       | None = None
+campfire:    CampfireService        | None = None
+downtime:    DowntimeService        | None = None
+retcon:      RetconService          | None = None
+backchannel: AdminBackchannelService | None = None
 
 
 async def _downtime_resolver_loop() -> None:
@@ -133,11 +138,15 @@ async def lifespan(app: FastAPI):
     await node_router.start()   # begin background health-check loop
 
     # Initialise async-session services now that db.pool is live
-    global chronicle, campfire, downtime, retcon
-    chronicle = ChronicleService(settings, db.pool)
-    campfire  = CampfireService(settings, db.pool)
-    downtime  = DowntimeService(settings, db.pool)
-    retcon    = RetconService(db.pool)
+    global chronicle, campfire, downtime, retcon, backchannel
+    chronicle   = ChronicleService(settings, db.pool)
+    campfire    = CampfireService(settings, db.pool)
+    downtime    = DowntimeService(settings, db.pool)
+    retcon      = RetconService(db.pool)
+    backchannel = AdminBackchannelService(db.pool)
+
+    # Expose backchannel service to web router
+    app.state.backchannel = backchannel
 
     # Start downtime background resolver
     resolver_task = asyncio.create_task(_downtime_resolver_loop())
@@ -257,6 +266,11 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
         # ── Phase 3: State Commitment ─────────────────────────────────────────
         commit = await state_commit.commit(resolution)
 
+        # ── Fetch pending admin backchannel directives ────────────────────────
+        active_directives: list[GMDirective] = []
+        if backchannel:
+            active_directives = await backchannel.get_pending_directives(campaign_id)
+
         # ── Phase 4: Narrative Generation (with story memory) ─────────────────
         narrative = await narration.narrate(
             resolution=resolution,
@@ -265,7 +279,15 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
             player_intent=intent.raw_input,
             campaign_system=campaign_system,
             campaign_id=campaign_id,
+            active_directives=active_directives or None,
         )
+
+        # ── Consume injected directives ───────────────────────────────────────
+        if backchannel and active_directives:
+            await backchannel.consume_directives(
+                directive_ids=[d.directive_id for d in active_directives],
+                intent_id=intent.intent_id,
+            )
 
         # ── Persist audit log ─────────────────────────────────────────────────
         duration_ms = int((time.monotonic() - pipeline_start) * 1000)
@@ -508,6 +530,56 @@ async def api_retcon(req: RetconRequest) -> RetconResponse:
     except Exception as exc:
         logger.exception("Retcon failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin Backchannel API  (White Portal private interface)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post(
+    "/api/backchannel/directive",
+    response_model=GMDirective,
+    summary="Submit an OOC World Architect directive to the GM Engine",
+    status_code=201,
+)
+async def api_submit_directive(req: GMDirectiveRequest) -> GMDirective:
+    """
+    Submit a private admin instruction through the White Portal backchannel.
+    The directive will be injected into the next player action's narrative
+    for the specified campaign and then archived.
+
+    Admin Discord accounts in the game channels are NOT elevated — this
+    endpoint is the ONLY way to influence the story as a World Architect.
+    """
+    if not backchannel:
+        raise HTTPException(status_code=503, detail="Backchannel service not initialised.")
+    try:
+        return await backchannel.submit_directive(req)
+    except Exception as exc:
+        logger.exception("Directive submission failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get(
+    "/api/backchannel/directives/{campaign_id}",
+    summary="List recent directives for a campaign (White Portal history view)",
+)
+async def api_list_directives(campaign_id: str, limit: int = 30) -> list[dict]:
+    if not backchannel:
+        raise HTTPException(status_code=503, detail="Backchannel service not initialised.")
+    return await backchannel.get_recent_directives(campaign_id, limit)
+
+
+@app.post(
+    "/api/backchannel/directive/{directive_id}/cancel",
+    summary="Cancel a pending directive before it fires",
+    status_code=200,
+)
+async def api_cancel_directive(directive_id: str) -> dict:
+    if not backchannel:
+        raise HTTPException(status_code=503, detail="Backchannel service not initialised.")
+    await backchannel.cancel_directive(directive_id)
+    return {"status": "ok", "directive_id": directive_id}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

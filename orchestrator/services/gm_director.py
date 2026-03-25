@@ -68,6 +68,7 @@ if TYPE_CHECKING:
 import asyncio
 
 from orchestrator.prompts.gm_prompts import (
+    GM_DIRECTIVE_BLOCK,
     GM_PLANNING_PROMPT,
     GM_PLANNING_SYSTEM_PROMPT,
     GM_STAT_CHANGE_BLOCK,
@@ -88,6 +89,7 @@ from orchestrator.schemas.payloads import (
     ActionOutcome,
     ChannelDirective,
     CharacterSnapshot,
+    GMDirective,
     GMPlanResult,
     ThreadEvent,
     TTSCue,
@@ -131,12 +133,13 @@ class GMDirector:
 
     async def narrate(
         self,
-        resolution:      OllamaResolutionPayload,
-        commit:          StateCommitPayload,
-        character:       CharacterSnapshot,
-        player_intent:   str,
-        campaign_system: str,
-        campaign_id:     str,
+        resolution:       OllamaResolutionPayload,
+        commit:           StateCommitPayload,
+        character:        CharacterSnapshot,
+        player_intent:    str,
+        campaign_system:  str,
+        campaign_id:      str,
+        active_directives: list["GMDirective"] | None = None,
     ) -> NarrativeResponsePayload:
         """
         Full GM Director pipeline: plan → delegate → synthesize → filter.
@@ -195,7 +198,11 @@ class GMDirector:
             else "  (None specified — all scene content came from sub-agents.)"
         )
 
+        # Build directive block for World Architect injection
+        directive_block = _build_directive_block(active_directives)
+
         synthesis_prompt = GM_SYNTHESIS_PROMPT.format(
+            directive_block=directive_block,
             mechanical_context=mech_context,
             story_context=story_block,
             player_action=player_intent,
@@ -600,6 +607,21 @@ def _build_thread_event(
         return ThreadEvent.COMBAT, title, content
 
     return None, "Encounter Details", None
+
+
+def _build_directive_block(directives: list | None) -> str:
+    """
+    Build the [WORLD ARCHITECT DIRECTIVE] injection block for the synthesis prompt.
+    Returns an empty string when there are no active directives so the prompt
+    format() call is always clean.
+    """
+    if not directives:
+        return ""
+    lines = []
+    for d in directives:
+        type_label = d.directive_type.value.replace("_", " ").upper()
+        lines.append(f"[{type_label}] {d.directive_text}")
+    return GM_DIRECTIVE_BLOCK.format(directives="\n".join(lines))
 
 
 def _infer_ambient_audio_key(resolution: OllamaResolutionPayload) -> str | None:

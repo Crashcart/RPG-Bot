@@ -5,19 +5,22 @@ Serves HTML pages (Jinja2) for the browser-based rule management panel.
 All routes are under /web/.  JSON API endpoints are under /api/.
 
 Pages:
-  GET  /web/                    – Campaign dashboard
-  GET  /web/rules               – Rule registry browser + upload form
-  POST /web/rules/upload        – Load a new JSON rule module
-  POST /web/rules/toggle/{id}   – Toggle a module active/inactive
-  POST /web/rules/delete/{id}   – Remove a module
-  GET  /web/lore                – Story memory / world facts browser (read)
-  POST /web/lore/upsert         – Add or edit a story fact (write)
-  POST /web/lore/delete         – Delete a story fact
-  GET  /web/log                 – Action log browser
-  GET  /web/nodes               – AI node registry / Connection Dashboard
-  POST /web/nodes/add           – Add or update an Ollama/Gemini node
-  POST /web/nodes/toggle/{id}   – Enable / disable a node
-  POST /web/nodes/delete/{id}   – Remove a node from the registry
+  GET  /web/                       – Campaign dashboard
+  GET  /web/rules                  – Rule registry browser + upload form
+  POST /web/rules/upload           – Load a new JSON rule module
+  POST /web/rules/toggle/{id}      – Toggle a module active/inactive
+  POST /web/rules/delete/{id}      – Remove a module
+  GET  /web/lore                   – Story memory / world facts browser (read)
+  POST /web/lore/upsert            – Add or edit a story fact (write)
+  POST /web/lore/delete            – Delete a story fact
+  GET  /web/log                    – Action log browser
+  GET  /web/nodes                  – AI node registry / Connection Dashboard
+  POST /web/nodes/add              – Add or update an Ollama/Gemini node
+  POST /web/nodes/toggle/{id}      – Enable / disable a node
+  POST /web/nodes/delete/{id}      – Remove a node from the registry
+  GET  /web/backchannel            – White Portal Admin Backchannel
+  POST /web/backchannel/send       – Submit a new OOC directive
+  POST /web/backchannel/cancel/{id} – Cancel a pending directive
 """
 
 from __future__ import annotations
@@ -51,6 +54,9 @@ def _cache(request: Request):
 
 def _pdf_processor(request: Request):
     return request.app.state.pdf_processor
+
+def _backchannel(request: Request):
+    return getattr(request.app.state, "backchannel", None)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -371,3 +377,63 @@ async def pdf_status(request: Request, job_id: str):
     if not progress:
         return JSONResponse({"status": "unknown"}, status_code=404)
     return JSONResponse(progress)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin Backchannel – White Portal "God Mode" Interface
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/backchannel", response_class=HTMLResponse)
+async def backchannel_page(request: Request, campaign_id: str = ""):
+    db         = _db(request)
+    bc         = _backchannel(request)
+    campaigns  = await db.get_all_campaigns()
+    directives = []
+    if campaign_id and bc:
+        directives = await bc.get_recent_directives(campaign_id, limit=50)
+    return _tmpl(request).TemplateResponse("backchannel.html", {
+        "request":           request,
+        "page":              "backchannel",
+        "campaigns":         campaigns,
+        "directives":        directives,
+        "selected_campaign": campaign_id,
+        "flash_ok":          request.session.pop("flash_ok",  ""),
+        "flash_err":         request.session.pop("flash_err", ""),
+    })
+
+
+@router.post("/backchannel/send", response_class=RedirectResponse)
+async def backchannel_send(
+    request:        Request,
+    campaign_id:    str = Form(...),
+    admin_id:       str = Form("web-admin"),
+    directive_type: str = Form("scene_directive"),
+    directive_text: str = Form(...),
+    priority:       int = Form(5),
+):
+    bc = _backchannel(request)
+    if not bc:
+        request.session["flash_err"] = "Backchannel service unavailable."
+        return RedirectResponse(f"/web/backchannel?campaign_id={campaign_id}", status_code=303)
+    try:
+        from orchestrator.schemas.payloads import DirectiveType, GMDirectiveRequest
+        await bc.submit_directive(GMDirectiveRequest(
+            campaign_id=campaign_id,
+            admin_id=admin_id,
+            directive_type=DirectiveType(directive_type),
+            directive_text=directive_text.strip(),
+            priority=max(1, min(10, priority)),
+        ))
+        request.session["flash_ok"] = "Directive queued — fires on the next player action."
+    except Exception as exc:
+        request.session["flash_err"] = str(exc)
+    return RedirectResponse(f"/web/backchannel?campaign_id={campaign_id}", status_code=303)
+
+
+@router.post("/backchannel/cancel/{directive_id}", response_class=JSONResponse)
+async def backchannel_cancel(request: Request, directive_id: str):
+    bc = _backchannel(request)
+    if not bc:
+        return JSONResponse({"ok": False, "error": "service unavailable"}, status_code=503)
+    await bc.cancel_directive(directive_id)
+    return JSONResponse({"ok": True})

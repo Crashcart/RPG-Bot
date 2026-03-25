@@ -1,0 +1,295 @@
+{% extends "base.html" %}
+{% block title %}Backchannel{% endblock %}
+{% block content %}
+
+<style>
+  /* ── Backchannel-specific styles ──────────────────────────────── */
+  .bc-layout { display: grid; grid-template-columns: 340px 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 800px) { .bc-layout { grid-template-columns: 1fr; } }
+
+  .chat-feed {
+    display: flex; flex-direction: column; gap: 8px;
+    max-height: 620px; overflow-y: auto; padding: 4px 2px;
+  }
+  .chat-feed::-webkit-scrollbar { width: 4px; }
+  .chat-feed::-webkit-scrollbar-track { background: transparent; }
+  .chat-feed::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+  .directive-bubble {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 12px 14px; position: relative;
+  }
+  .directive-bubble.status-consumed { border-color: rgba(76,175,120,0.2); opacity: 0.65; }
+  .directive-bubble.status-cancelled { opacity: 0.35; }
+  .directive-bubble.status-pending { border-color: rgba(201,168,76,0.35); }
+
+  .bubble-meta {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 7px;
+  }
+  .bubble-type {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--muted);
+  }
+  .bubble-time { font-size: 10px; color: var(--muted); }
+  .bubble-text { font-size: 13px; line-height: 1.55; color: var(--text); }
+  .bubble-footer {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-top: 8px;
+  }
+  .priority-pip {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 10px; color: var(--muted);
+  }
+  .pip { width: 6px; height: 6px; border-radius: 50%; background: var(--border); }
+  .pip.filled { background: var(--gold); }
+
+  .status-badge-pending   { color: var(--gold);  }
+  .status-badge-consumed  { color: var(--green); }
+  .status-badge-cancelled { color: var(--muted); }
+
+  .cancel-btn {
+    font-size: 10px; color: var(--muted); background: none; border: none;
+    cursor: pointer; padding: 2px 6px; border-radius: 4px;
+    transition: color 0.15s, background 0.15s;
+  }
+  .cancel-btn:hover { color: var(--red); background: rgba(207,76,90,0.08); }
+
+  .compose-card { position: sticky; top: 70px; }
+  .type-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+  .type-option input[type="radio"] { display: none; }
+  .type-label {
+    display: block; padding: 8px 10px; text-align: center;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    font-size: 11px; font-weight: 600; color: var(--muted);
+    cursor: pointer; transition: all 0.15s;
+  }
+  .type-option input:checked + .type-label {
+    border-color: var(--gold); color: var(--gold);
+    background: rgba(201,168,76,0.08);
+  }
+
+  .priority-slider { width: 100%; accent-color: var(--gold); }
+  .priority-labels { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+  .fair-play-notice {
+    background: rgba(92,143,214,0.08); border: 1px solid rgba(92,143,214,0.2);
+    border-radius: var(--radius); padding: 12px 14px; margin-bottom: 16px;
+    font-size: 12px; color: var(--blue); line-height: 1.55;
+  }
+  .fair-play-notice strong { display: block; margin-bottom: 4px; font-size: 13px; }
+
+  .empty-feed { text-align: center; padding: 48px 16px; color: var(--muted); }
+  .empty-feed .empty-icon { font-size: 28px; margin-bottom: 10px; opacity: 0.4; }
+</style>
+
+<div class="page-header">
+  <h1><span>🔮</span> White Portal Backchannel</h1>
+  <p>World Architect interface — issue private OOC directives to the GM Engine.</p>
+</div>
+
+<!-- Fair Play Notice -->
+<div class="fair-play-notice">
+  <strong>⚖ Fair Play Sandbox Active</strong>
+  This is the ONLY channel through which you can influence the story as World Architect.
+  Your Discord account is treated as a standard player — no elevated privileges exist in-game.
+  Directives submitted here fire on the next player action in the selected campaign.
+</div>
+
+<!-- Campaign selector -->
+<form method="get" action="/web/backchannel" style="margin-bottom:16px">
+  <div class="row">
+    <div class="form-row" style="max-width:320px">
+      <label>Campaign</label>
+      <select name="campaign_id" onchange="this.form.submit()">
+        <option value="">— select campaign —</option>
+        {% for c in campaigns %}
+        <option value="{{ c.id }}" {% if c.id == selected_campaign %}selected{% endif %}>
+          {{ c.name }} ({{ c.system }})
+        </option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+</form>
+
+{% if selected_campaign %}
+<div class="bc-layout">
+
+  <!-- ── Directive Feed ──────────────────────────────────────────────────── -->
+  <div>
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">📜 Directive History</span>
+        <span style="font-size:11px;color:var(--muted)">most recent first</span>
+      </div>
+      <div class="card-body" style="padding:12px">
+        {% if directives %}
+        <div class="chat-feed" id="feed">
+          {% for d in directives %}
+          <div class="directive-bubble status-{{ d.status }}" id="dir-{{ d.directive_id }}">
+            <div class="bubble-meta">
+              <span class="bubble-type">{{ d.directive_type | replace("_", " ") }}</span>
+              <span class="bubble-time">{{ d.submitted_at }}</span>
+            </div>
+            <div class="bubble-text">{{ d.directive_text }}</div>
+            <div class="bubble-footer">
+              <div class="priority-pip">
+                {% for i in range(10) %}
+                <span class="pip {% if i < d.priority %}filled{% endif %}"></span>
+                {% endfor %}
+                <span style="margin-left:4px">p{{ d.priority }}</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px">
+                {% if d.consumed_at %}
+                <span class="status-badge-consumed" style="font-size:10px">✓ fired {{ d.consumed_at }}</span>
+                {% elif d.status == 'cancelled' %}
+                <span class="status-badge-cancelled" style="font-size:10px">✗ cancelled</span>
+                {% else %}
+                <span class="status-badge-pending" style="font-size:10px">⏳ pending</span>
+                <button class="cancel-btn"
+                  onclick="cancelDirective('{{ d.directive_id }}', this)"
+                  title="Cancel before it fires">✕ cancel</button>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty-feed">
+          <div class="empty-icon">🔮</div>
+          <p>No directives yet for this campaign.</p>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Compose Panel ───────────────────────────────────────────────────── -->
+  <div class="compose-card">
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">✍ Issue Directive</span>
+      </div>
+      <div class="card-body">
+        <form method="post" action="/web/backchannel/send">
+          <input type="hidden" name="campaign_id" value="{{ selected_campaign }}">
+          <input type="hidden" name="admin_id"    value="web-admin">
+
+          <!-- Directive type -->
+          <div class="form-row">
+            <label>Type</label>
+            <div class="type-grid">
+              {% set dtypes = [
+                ("scene_directive", "🌩 Scene Event"),
+                ("npc_hint",        "💬 NPC Hint"),
+                ("world_event",     "🌍 World Event"),
+                ("pacing_note",     "🎭 Pacing Note"),
+                ("correction",      "↩ Correction"),
+              ] %}
+              {% for val, label in dtypes %}
+              <div class="type-option">
+                <input type="radio" name="directive_type" id="dt_{{ val }}" value="{{ val }}"
+                       {% if loop.first %}checked{% endif %}>
+                <label class="type-label" for="dt_{{ val }}">{{ label }}</label>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+
+          <!-- Directive text -->
+          <div class="form-row">
+            <label>Instruction to GM Engine</label>
+            <textarea name="directive_text" rows="5" maxlength="800"
+              placeholder="e.g. Trigger a sudden thunderstorm that rattles the tavern windows, unsettling everyone inside. A hooded figure slips out the back door during the commotion."
+              required style="resize:vertical"></textarea>
+            <div style="font-size:10px;color:var(--muted);margin-top:4px">
+              Plain English. The GM weaves this naturally into the scene — it won't be announced.
+            </div>
+          </div>
+
+          <!-- Priority -->
+          <div class="form-row">
+            <label>Priority <span id="prio-val" style="color:var(--gold)">5</span> / 10</label>
+            <input type="range" name="priority" id="prio-slider" class="priority-slider"
+                   min="1" max="10" value="5"
+                   oninput="document.getElementById('prio-val').textContent=this.value">
+            <div class="priority-labels">
+              <span>1 — if context fits</span>
+              <span>10 — unconditional</span>
+            </div>
+          </div>
+
+          <button type="submit" class="btn btn-gold" style="width:100%;justify-content:center">
+            🔮 Send to GM Engine
+          </button>
+        </form>
+
+        <hr style="margin:20px 0">
+
+        <!-- Type reference -->
+        <details>
+          <summary class="expand-btn">📋 Directive type reference</summary>
+          <div style="margin-top:12px;font-size:12px;line-height:1.7;color:var(--muted)">
+            <p><strong style="color:var(--text)">🌩 Scene Directive</strong><br>
+            Trigger an environmental or atmospheric event. The storm breaks, the candles gutter, an explosion echoes in the distance.</p>
+            <p style="margin-top:8px"><strong style="color:var(--text)">💬 NPC Hint</strong><br>
+            Have a specific NPC drop a plot-relevant clue. Specify which NPC if possible.</p>
+            <p style="margin-top:8px"><strong style="color:var(--text)">🌍 World Event</strong><br>
+            Something happens in the wider world right now — news arrives, a crowd forms, soldiers march through.</p>
+            <p style="margin-top:8px"><strong style="color:var(--text)">🎭 Pacing Note</strong><br>
+            Meta-instruction about tone or dramatic weight. "This is the moment they've been building to — play it big."</p>
+            <p style="margin-top:8px"><strong style="color:var(--text)">↩ Correction</strong><br>
+            Fix a continuity error or missed clue without railroading. "The players overlooked the bloodstained map — weave it back into view naturally."</p>
+          </div>
+        </details>
+      </div>
+    </div>
+
+    <!-- Anti-Railroading Mandate reminder -->
+    <div class="card" style="border-color:rgba(159,111,224,0.2)">
+      <div class="card-header" style="border-bottom-color:rgba(159,111,224,0.15)">
+        <span class="card-title" style="color:var(--purple)">⚖ Anti-Railroading Mandate</span>
+      </div>
+      <div class="card-body" style="font-size:12px;color:var(--muted);line-height:1.7">
+        <p>The GM Engine enforces a hard-coded player agency lock on every narrative.</p>
+        <p style="margin-top:8px"><strong style="color:var(--green)">GM CAN:</strong> write NPC reactions, environmental changes, world consequences.</p>
+        <p style="margin-top:4px"><strong style="color:var(--red)">GM CANNOT:</strong> write what players think, feel, say, or decide. Every scene ends returning choice to the player.</p>
+        <p style="margin-top:8px">Your directives shape the <em>world's reactions</em> — not the players' story.</p>
+      </div>
+    </div>
+  </div>
+
+</div>
+{% else %}
+<div class="empty">
+  <div class="empty-icon">🔮</div>
+  <p>Select a campaign above to open the backchannel.</p>
+</div>
+{% endif %}
+
+<script>
+async function cancelDirective(id, btn) {
+  if (!confirm('Cancel this directive before it fires?')) return;
+  const resp = await fetch(`/web/backchannel/cancel/${id}`, { method: 'POST' });
+  if (resp.ok) {
+    const bubble = document.getElementById('dir-' + id);
+    if (bubble) {
+      bubble.classList.remove('status-pending');
+      bubble.classList.add('status-cancelled');
+      btn.closest('.bubble-footer').querySelector('.status-badge-pending').remove();
+      btn.remove();
+      const newBadge = document.createElement('span');
+      newBadge.className = 'status-badge-cancelled';
+      newBadge.style.fontSize = '10px';
+      newBadge.textContent = '✗ cancelled';
+      btn.closest('.bubble-footer').querySelector('div:last-child').appendChild(newBadge);
+    }
+  } else {
+    alert('Cancel failed. Try refreshing.');
+  }
+}
+</script>
+
+{% endblock %}

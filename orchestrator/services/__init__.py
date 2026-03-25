@@ -11,6 +11,7 @@ from .chronicle import ChronicleService
 from .campfire import CampfireService
 from .downtime import DowntimeService
 from .retcon import RetconService
+from .admin_backchannel import AdminBackchannelService
 
 __all__ = [
     "DatabaseService",
@@ -26,4 +27,5 @@ __all__ = [
     "CampfireService",
     "DowntimeService",
     "RetconService",
+    "AdminBackchannelService",
 ]

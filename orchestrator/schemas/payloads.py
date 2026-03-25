@@ -688,3 +688,54 @@ class RetconResponse(BaseModel):
     character_id:    str
     restored_stats:  dict[str, Any]
     retconned_at:    datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin Backchannel Schemas
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DirectiveType(str, Enum):
+    SCENE_DIRECTIVE = "scene_directive"   # trigger env event next scene
+    NPC_HINT        = "npc_hint"          # have NPC drop a specific hint
+    WORLD_EVENT     = "world_event"       # something happens in the world right now
+    PACING_NOTE     = "pacing_note"       # "make this moment feel climactic"
+    CORRECTION      = "correction"        # subtle fix without railroading
+
+
+class GMDirectiveRequest(BaseModel):
+    """
+    An OOC (Out-of-Character) admin command sent through the White Portal
+    Backchannel to the GM Engine.  The GM weaves it into the next player
+    action's narrative as a high-priority world-management event.
+
+    This is the ONLY channel through which an admin can influence the story
+    mechanically.  Admin accounts in Discord are treated as standard players
+    (Fair Play Sandbox).
+    """
+    campaign_id:     str           = Field(..., description="Campaign UUID")
+    admin_id:        str           = Field(..., description="Admin Discord snowflake")
+    directive_type:  DirectiveType = Field(default=DirectiveType.SCENE_DIRECTIVE)
+    directive_text:  str           = Field(
+        ...,
+        description="Plain-English instruction to the GM Engine",
+        max_length=800,
+    )
+    priority:        int           = Field(
+        default=5,
+        ge=1,
+        le=10,
+        description="Injection urgency: 10 = inject unconditionally, 1 = only if scene context fits",
+    )
+
+
+class GMDirective(BaseModel):
+    """A single GM directive record, as stored in the database."""
+    directive_id:    str
+    campaign_id:     str
+    admin_id:        str
+    directive_type:  DirectiveType
+    directive_text:  str
+    priority:        int
+    status:          str  = "pending"    # pending | consumed | cancelled
+    submitted_at:    datetime
+    consumed_at:     datetime | None = None
