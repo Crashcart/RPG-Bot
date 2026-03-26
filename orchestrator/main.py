@@ -73,11 +73,13 @@ from orchestrator.services import (
     TelemetryService,
     WebSearchService,
 )
-from orchestrator.services.janitor         import JanitorService
-from orchestrator.services.paradox_engine  import ParadoxEngine
+from orchestrator.services.janitor          import JanitorService
+from orchestrator.services.paradox_engine   import ParadoxEngine
 from orchestrator.services.prophetic_buffer import PropheticBuffer
-from orchestrator.services.reality_wall    import RealityWall
-from orchestrator.services.pdf_processor   import PDFProcessorService
+from orchestrator.services.reality_wall     import RealityWall
+from orchestrator.services.world_registry   import WorldRegistry
+from orchestrator.services.pdf_processor    import PDFProcessorService
+from orchestrator.schemas.world_schema      import WorldSchema, WorldSwitchRequest, WorldSwitchResponse
 
 # ─────────────────────────────────────────────────────────────────────────────
 settings = get_settings()
@@ -127,6 +129,9 @@ prophetic_buffer = PropheticBuffer(cache=cache, storyteller=_cloud_storyteller)
 # ── Janitor (GFS backup + media auto-prune) ───────────────────────────────────
 janitor = JanitorService(data_dir=settings.world_data_dir)
 
+# ── World Registry (dynamic genre discovery + schema cache) ───────────────────
+world_registry = WorldRegistry(data_dir=settings.world_data_dir, reality_wall=reality_wall)
+
 # ── Tier 1: GM Director (Central Storyteller) ─────────────────────────────────
 # Selects the storyteller per-turn (Gemini or auto-promoted Ollama), runs the
 # planning pass, dispatches sub-agents, synthesizes, and applies immersion filters.
@@ -140,6 +145,7 @@ gm_director = GMDirector(
     cloud_provider=settings.cloud_provider,
     reality_wall=reality_wall,
     paradox_engine=paradox_engine,
+    world_registry=world_registry,
 )
 
 # Pipeline phase singletons
@@ -181,7 +187,8 @@ async def lifespan(app: FastAPI):
     await rag.connect()
     await story_memory.connect(db.pool)
     await node_router.start()   # begin background health-check loop
-    await reality_wall.init()   # create SQLite schema + data dirs
+    await reality_wall.init()        # create SQLite schema + data dirs
+    await world_registry.scan()      # discover all worlds in data/fonts/
     await prophetic_buffer.start()
     await janitor.start()
 
@@ -985,3 +992,69 @@ async def telemetry_websocket(websocket: WebSocket):
 @app.get("/health", summary="Health check")
 async def health() -> dict:
     return {"status": "ok", "service": "ironclad-orchestrator"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dynamic World / Genre Orchestration
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get(
+    "/api/worlds",
+    summary="List all discovered RPG worlds",
+    response_model=list[WorldSchema],
+)
+async def list_worlds() -> list[WorldSchema]:
+    """
+    Return every world currently in the WorldRegistry cache.
+    Each world corresponds to a subdirectory of data/fonts/.
+    """
+    return world_registry.list_worlds()
+
+
+@app.post(
+    "/api/world/switch",
+    summary="Switch a campaign's active world (manifests new worlds automatically)",
+    response_model=WorldSwitchResponse,
+)
+async def switch_world(req: WorldSwitchRequest) -> WorldSwitchResponse:
+    """
+    Bind a campaign to a world.
+
+    - If the world folder exists in data/fonts/ it is activated immediately.
+    - If it does not exist, the folder + minimal world.json are created
+      on the fly (`manifested: true`) — no code changes required.
+
+    Called by the Discord `/switch_world` slash command.
+    """
+    try:
+        schema, manifested = await world_registry.switch_campaign_world(
+            campaign_id=req.campaign_id,
+            world_name=req.world_name,
+        )
+        return WorldSwitchResponse(
+            campaign_id=req.campaign_id,
+            world_name=req.world_name,
+            manifested=manifested,
+            schema=schema,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"World switch failed: {exc}",
+        )
+
+
+@app.get(
+    "/api/world/{campaign_id}",
+    summary="Get the active world schema for a campaign",
+    response_model=WorldSchema,
+)
+async def get_campaign_world(campaign_id: str) -> WorldSchema:
+    """Return the WorldSchema for the campaign's currently active world."""
+    schema = await world_registry.get_campaign_schema(campaign_id)
+    if schema is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No world set for campaign {campaign_id}.",
+        )
+    return schema

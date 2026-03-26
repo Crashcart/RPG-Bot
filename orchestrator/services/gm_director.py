@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     from orchestrator.services.story_memory          import StoryMemoryService
     from orchestrator.services.sub_agent_dispatcher  import SubAgentDispatcher
     from orchestrator.services.telemetry             import TelemetryService
+    from orchestrator.services.world_registry        import WorldRegistry
 
 import asyncio
 
@@ -132,6 +133,7 @@ class GMDirector:
         cloud_provider: str = "gemini",
         reality_wall:   "RealityWall | None" = None,
         paradox_engine: "ParadoxEngine | None" = None,
+        world_registry: "WorldRegistry | None" = None,
     ) -> None:
         self._gemini         = gemini
         self._claude         = claude
@@ -142,6 +144,7 @@ class GMDirector:
         self._telemetry      = telemetry
         self._reality_wall   = reality_wall
         self._paradox_engine = paradox_engine
+        self._world_registry = world_registry
 
     # ── Public Interface ───────────────────────────────────────────────────────
 
@@ -252,9 +255,25 @@ class GMDirector:
         if self._telemetry:
             await self._telemetry.emit("synthesis_start", storyteller=storyteller_name)
 
+        # ── Inject dynamic world tone into synthesis system prompt ────────────
+        synthesis_system = GM_SYSTEM_PROMPT
+        if self._world_registry:
+            try:
+                world_schema = await self._world_registry.get_campaign_schema(campaign_id)
+                if world_schema and world_schema.gm_tone_block:
+                    synthesis_system = world_schema.gm_tone_block + "\n\n" + GM_SYSTEM_PROMPT
+                    if self._telemetry:
+                        await self._telemetry.emit(
+                            "world_tone_injected",
+                            world=world_schema.display_name,
+                            campaign_id=campaign_id,
+                        )
+            except Exception as _wt_exc:
+                logger.debug("World tone injection failed (non-fatal): %s", _wt_exc)
+
         has_npc_tasks = any(r.task.task_type == "npc_dialogue" for r in sub_results)
         synthesis_coro = storyteller.generate(
-            system_prompt=GM_SYSTEM_PROMPT,
+            system_prompt=synthesis_system,
             user_prompt=synthesis_prompt,
             max_tokens=_SYNTHESIS_MAX_TOKENS,
         )

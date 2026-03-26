@@ -1,0 +1,10 @@
+{
+  "display_name":   "Mothership",
+  "primary_color":  "#FF4500",
+  "default_font":   "",
+  "narrative_tone": "grimdark sci-fi horror",
+  "description":    "You are adrift in a dying universe aboard a failing ship. Survival is not guaranteed — it is improbable. The darkness between stars is not empty; something old lives there and it has noticed you. Oxygen alarms mean something went wrong. Stress counters mean something is about to. Every decision carries the weight of irreversible consequence. Narrate with clinical dread, mechanical precision, and the cold logic of deep space. Characters do not feel heroic — they feel small, exhausted, and afraid.",
+  "system":         "mothership",
+  "dice_notation":  "percentile",
+  "tags":           ["sci-fi", "horror", "survival", "grimdark"]
+}

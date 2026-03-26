@@ -39,10 +39,48 @@ docker-compose.yml  Full stack (11 services)
 | Module | Role |
 |--------|------|
 | `RealityWall` | SQLite (WAL) world-state registry. Tracks `current_world` per campaign, enforces `data/handouts/{world}/` and `data/echo_vault/{world}/` path isolation. Also owns `paradox_level` per campaign. |
+| `WorldRegistry` | Dynamic genre orchestration. Scans `data/fonts/` for world directories, loads `world.json` metadata, injects tone into GM prompts. `/switch_world` manifests new worlds on the fly. |
 | `PropheticBuffer` | Fire-and-forget background worker enqueued after every pipeline turn. Pre-generates text snippets and ambient audio keys for the most likely follow-up action; results cached in Redis (TTL 120 s). |
 | `ParadoxEngine` | Stateless post-processor applied by GMDirector after Step 4d. Scales unreliable-narrator artefacts to `paradox_level` 1–10 (1 = passthrough, 10 = full breakdown). |
 | `JanitorService` | Two background loops: GFS backup (daily/weekly/monthly rotation of `reality_wall.db`) and media auto-prune (delete `.png/.mp3/.mp4` > 30 days from handouts + echo_vault). |
 | `HealthSentinel` | Flask sidecar on `:58291`. Reads `ironclad:sentinel:busy` from Redis; returns `{"status":"busy"}` while Phase 2 AI adjudication is running, `{"status":"ok"}` otherwise. |
+
+## Dynamic Genre Orchestration (Step 13)
+
+**Zero-code system switching.** Drop a folder into `data/fonts/` and the engine discovers it automatically on startup.
+
+```
+data/
+  fonts/
+    mothership/
+      world.json   ← defines tone, color, description, system, dice_notation
+    shadowrun/
+      world.json
+    pirate_borg/   ← created automatically by /switch_world pirate_borg
+      world.json
+```
+
+**`world.json` contract** (all fields optional except `display_name`):
+```json
+{
+  "display_name":   "Pirate Borg",
+  "primary_color":  "#FFD700",
+  "narrative_tone": "grimdark pirate chaos",
+  "description":    "One paragraph of world context injected into every GM prompt.",
+  "system":         "pirate_borg",
+  "dice_notation":  "d6",
+  "tags":           ["pirate", "grimdark", "horror"]
+}
+```
+
+**Discord commands:**
+- `/worlds` — list all discovered worlds with tone + tags
+- `/switch_world <name>` — raise the Reality Wall; creates the folder if it doesn't exist
+
+**API endpoints:**
+- `GET /api/worlds` — list all WorldSchema objects
+- `POST /api/world/switch` — bind campaign to world (manifests if needed)
+- `GET /api/world/{campaign_id}` — get active world schema for a campaign
 
 ## Key Architectural Rules
 

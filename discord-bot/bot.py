@@ -1308,6 +1308,139 @@ async def slash_insight(interaction: discord.Interaction, target: str) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Dynamic Genre Orchestration — World Switch Commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+@bot.tree.command(
+    name="worlds",
+    description="List all available RPG worlds/systems the GM can run.",
+)
+async def slash_worlds(interaction: discord.Interaction) -> None:
+    """Show every discovered world in the WorldRegistry."""
+    await interaction.response.defer(ephemeral=True)
+    try:
+        resp = await bot.http_client.get("/api/worlds")
+        resp.raise_for_status()
+        worlds: list[dict] = resp.json()
+
+        if not worlds:
+            await interaction.followup.send(
+                "No worlds discovered yet. Drop a folder into `data/fonts/` to register one.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title="📚 Available Worlds",
+            description="Use `/switch_world` to activate any world for this campaign.",
+            color=0x7B68EE,
+        )
+        for w in worlds:
+            tone = w.get("narrative_tone") or "No tone defined"
+            tags = ", ".join(w.get("tags", [])) or "—"
+            embed.add_field(
+                name=f"{w['display_name']}  (`{w.get('system') or 'unknown'}`)",
+                value=f"**Tone:** {tone}\n**Tags:** {tags}",
+                inline=False,
+            )
+        embed.set_footer(text=f"{len(worlds)} world(s) registered")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    except Exception as exc:
+        logger.exception("Slash /worlds failed: %s", exc)
+        await interaction.followup.send("⚠️ Could not fetch world list.", ephemeral=True)
+
+
+@bot.tree.command(
+    name="switch_world",
+    description="Switch the campaign to a different RPG world/system. Creates it if it doesn't exist.",
+)
+@app_commands.describe(
+    world_name="Folder name of the world (e.g. mothership, shadowrun, pirate_borg). "
+               "Use underscores, no spaces.",
+)
+async def slash_switch_world(
+    interaction: discord.Interaction,
+    world_name: str,
+) -> None:
+    """
+    Raise the Reality Wall around a new genre.
+
+    If the world folder already exists in data/fonts/, it is activated
+    immediately.  If it doesn't exist, the Scribe manifests the folder
+    structure on the fly — no code changes required.
+    """
+    await interaction.response.defer()
+
+    world_name = world_name.strip().lower().replace(" ", "_")
+    if not world_name or not world_name.replace("_", "").replace("-", "").isalnum():
+        await interaction.followup.send(
+            "⚠️ Invalid world name. Use letters, numbers, and underscores only.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        # Resolve active campaign for this guild
+        campaign_resp = await bot.http_client.get(
+            "/session",
+            params={"guild_id": str(interaction.guild_id)},
+        )
+        if campaign_resp.status_code != 200:
+            await interaction.followup.send(
+                "⚠️ No active campaign found for this server.", ephemeral=True
+            )
+            return
+        campaign_id = campaign_resp.json().get("campaign_id")
+        if not campaign_id:
+            await interaction.followup.send(
+                "⚠️ Could not resolve campaign ID.", ephemeral=True
+            )
+            return
+
+        # Call the world switch endpoint
+        switch_resp = await bot.http_client.post(
+            "/api/world/switch",
+            json={"campaign_id": campaign_id, "world_name": world_name},
+        )
+        switch_resp.raise_for_status()
+        data = switch_resp.json()
+
+        schema      = data["schema"]
+        manifested  = data.get("manifested", False)
+        color       = int(schema.get("primary_color", "#FFFFFF").lstrip("#"), 16)
+        display     = schema.get("display_name", world_name)
+        tone        = schema.get("narrative_tone") or "Not yet defined"
+        description = schema.get("description", "")[:300] or "Edit `world.json` to set a description."
+
+        embed = discord.Embed(
+            title=f"🌌 Reality Wall Raised — {display}",
+            description=description,
+            color=color,
+        )
+        embed.add_field(name="Narrative Tone", value=tone, inline=True)
+        embed.add_field(name="System",         value=schema.get("system") or world_name, inline=True)
+        embed.add_field(name="Dice",           value=schema.get("dice_notation") or "—", inline=True)
+        if manifested:
+            embed.add_field(
+                name="✨ New World Manifested",
+                value=(
+                    f"The folder `data/fonts/{world_name}/world.json` was created for you. "
+                    "Edit it to define tone, colour, and description."
+                ),
+                inline=False,
+            )
+        tags = ", ".join(schema.get("tags", [])) or "—"
+        embed.set_footer(text=f"Tags: {tags}")
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as exc:
+        logger.exception("Slash /switch_world failed: %s", exc)
+        await interaction.followup.send("⚠️ World switch failed. Check the logs.", ephemeral=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Entry Point
 # ─────────────────────────────────────────────────────────────────────────────
 

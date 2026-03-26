@@ -1,0 +1,10 @@
+{
+  "display_name":   "Pirate Borg",
+  "primary_color":  "#FFD700",
+  "default_font":   "",
+  "narrative_tone": "grimdark pirate chaos",
+  "description":    "The seas are cursed and so are you. The world is ending — it has been ending for a hundred years — and the smart money has already drowned. You sail because there is nowhere left to stand. Every port is corrupt, every captain is a monster, every treasure map leads somewhere you should not go. The dead do not stay dead here. The sea does not care about your story. Narrate with savage black-humour nihilism, salt-and-gunpowder grit, and the joyful absurdity of doomed wretches choosing violence over surrender.",
+  "system":         "pirate_borg",
+  "dice_notation":  "d6",
+  "tags":           ["pirate", "grimdark", "horror", "osr", "chaos"]
+}

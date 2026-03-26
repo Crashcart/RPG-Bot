@@ -1,0 +1,10 @@
+{
+  "display_name":   "Shadowrun",
+  "primary_color":  "#00FF88",
+  "default_font":   "",
+  "narrative_tone": "cyberpunk noir with magic",
+  "description":    "The year is 2080. Megacorporations own the sky and sell the air. Magic returned in 2011 and shattered the old world order — elves stalk penthouse boardrooms, trolls run street gangs, and a shaman can crash a Shiawase security subnet with the right spirit. You are a shadowrunner: deniable, expendable, and for hire. The Matrix is everywhere. Chrome is fashion and survival both. Every run is a heist, a war, or a funeral — usually all three. Narrate with neon-soaked cynicism, street-level grit, and the electric paranoia of a city that never sleeps because it is afraid of what watches it.",
+  "system":         "shadowrun_6e",
+  "dice_notation":  "d6 dice pool",
+  "tags":           ["cyberpunk", "fantasy", "noir", "heist"]
+}

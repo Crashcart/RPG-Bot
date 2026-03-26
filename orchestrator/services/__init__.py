@@ -22,6 +22,7 @@ from .reality_wall import RealityWall
 from .paradox_engine import ParadoxEngine
 from .prophetic_buffer import PropheticBuffer
 from .janitor import JanitorService
+from .world_registry import WorldRegistry
 
 __all__ = [
     "DatabaseService",
@@ -48,4 +49,5 @@ __all__ = [
     "ParadoxEngine",
     "PropheticBuffer",
     "JanitorService",
+    "WorldRegistry",
 ]
