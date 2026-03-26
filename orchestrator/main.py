@@ -57,6 +57,7 @@ from orchestrator.services import (
     CacheService,
     CampfireService,
     ChronicleService,
+    ClaudeClient,
     DatabaseService,
     DiskAgentService,
     DowntimeService,
@@ -86,6 +87,7 @@ rag           = RAGService(settings)
 ollama        = OllamaClient(settings)   # env-default fallback
 node_router   = NodeRouter(db, settings) # multi-node AI mesh
 gemini        = GeminiClient(settings)
+claude        = ClaudeClient(settings) if settings.claude_api_key else None
 story_memory  = StoryMemoryService(settings)
 pdf_processor = PDFProcessorService(
     gemini_api_key=settings.gemini_api_key,
@@ -117,6 +119,8 @@ gm_director = GMDirector(
     dispatcher=sub_agent_dispatcher,
     story_memory=story_memory,
     telemetry=telemetry_svc,
+    claude=claude,
+    cloud_provider=settings.cloud_provider,
 )
 
 # Pipeline phase singletons

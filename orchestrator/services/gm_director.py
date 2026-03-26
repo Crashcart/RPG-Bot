@@ -60,6 +60,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from orchestrator.services.claude_client         import ClaudeClient
     from orchestrator.services.gemini_client         import GeminiClient
     from orchestrator.services.node_router           import NodeRouter
     from orchestrator.services.story_memory          import StoryMemoryService
@@ -120,17 +121,21 @@ class GMDirector:
 
     def __init__(
         self,
-        gemini:       "GeminiClient",
-        node_router:  "NodeRouter",
-        dispatcher:   "SubAgentDispatcher",
-        story_memory: "StoryMemoryService",
-        telemetry:    "TelemetryService | None" = None,
+        gemini:         "GeminiClient",
+        node_router:    "NodeRouter",
+        dispatcher:     "SubAgentDispatcher",
+        story_memory:   "StoryMemoryService",
+        telemetry:      "TelemetryService | None" = None,
+        claude:         "ClaudeClient | None" = None,
+        cloud_provider: str = "gemini",
     ) -> None:
-        self._gemini       = gemini
-        self._node_router  = node_router
-        self._dispatcher   = dispatcher
-        self._story_memory = story_memory
-        self._telemetry    = telemetry
+        self._gemini         = gemini
+        self._claude         = claude
+        self._cloud_provider = cloud_provider
+        self._node_router    = node_router
+        self._dispatcher     = dispatcher
+        self._story_memory   = story_memory
+        self._telemetry      = telemetry
 
     # ── Public Interface ───────────────────────────────────────────────────────
 
@@ -374,20 +379,27 @@ class GMDirector:
         """
         Return the Tier 1 storyteller for this turn.
 
-        Cloud ON  → GeminiClient
+        Cloud ON + provider=claude → ClaudeClient (if configured)
+        Cloud ON + provider=gemini → GeminiClient (default)
         Cloud OFF → Auto-promoted fastest Ollama narrative node (TTFT order)
-        OFF + no node → GeminiClient (with a warning)
+        OFF + no node → cloud fallback (with a warning)
         """
         use_cloud = await self._node_router.is_storyteller_enabled()
         if use_cloud:
+            if self._cloud_provider == "claude" and self._claude is not None:
+                return self._claude
             return self._gemini
 
         local = await self._node_router.get_storyteller_client()
         if local is None:
+            cloud_name = "Claude" if self._cloud_provider == "claude" and self._claude else "Gemini"
             logger.warning(
                 "GM Director: Cloud Storyteller is OFF but no narrative-tagged node is available. "
-                "Falling back to Gemini. Tag at least one Ollama node with role='narrative'."
+                "Falling back to %s. Tag at least one Ollama node with role='narrative'.",
+                cloud_name,
             )
+            if self._cloud_provider == "claude" and self._claude is not None:
+                return self._claude
             return self._gemini
 
         return local
