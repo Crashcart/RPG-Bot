@@ -1,0 +1,9 @@
+{
+  "display_name": "Vampire: The Masquerade",
+  "primary_color": "#8B0000",
+  "narrative_tone": "gothic horror political intrigue",
+  "description": "You are dead. You remember breathing, but that warmth is gone now. The Blood sings in your veins and it demands to be fed. The Camarilla watches — the Anarchs scheme — the Second Inquisition hunts. The Masquerade must be maintained at all costs. Power is the only currency worth earning. Everyone is a pawn or a predator. Which are you?",
+  "system": "vtm_v5",
+  "dice_notation": "d10",
+  "tags": ["gothic", "horror", "political", "vampire", "urban-fantasy"]
+}

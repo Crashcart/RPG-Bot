@@ -54,9 +54,10 @@ class JanitorService:
     two independent asyncio tasks — one for GFS backups, one for media pruning.
     """
 
-    def __init__(self, data_dir: str = "/app/data") -> None:
+    def __init__(self, data_dir: str = "/app/data", backup_dir: str | None = None) -> None:
         self._data_dir   = Path(data_dir)
-        self._backup_dir = self._data_dir / "backups"
+        # TDR §2: backups at /app/backups (separate from data volume)
+        self._backup_dir = Path(backup_dir) if backup_dir else (self._data_dir / "backups")
         self._tasks: list[asyncio.Task] = []
 
     async def start(self) -> None:

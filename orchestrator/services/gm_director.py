@@ -255,19 +255,22 @@ class GMDirector:
         if self._telemetry:
             await self._telemetry.emit("synthesis_start", storyteller=storyteller_name)
 
-        # ── Inject dynamic world tone into synthesis system prompt ────────────
-        synthesis_system = GM_SYSTEM_PROMPT
+        # ── Inject dynamic world tone + capture driftnet channel ─────────────
+        synthesis_system  = GM_SYSTEM_PROMPT
+        driftnet_channel_id: str = ""
         if self._world_registry:
             try:
                 world_schema = await self._world_registry.get_campaign_schema(campaign_id)
-                if world_schema and world_schema.gm_tone_block:
-                    synthesis_system = world_schema.gm_tone_block + "\n\n" + GM_SYSTEM_PROMPT
-                    if self._telemetry:
-                        await self._telemetry.emit(
-                            "world_tone_injected",
-                            world=world_schema.display_name,
-                            campaign_id=campaign_id,
-                        )
+                if world_schema:
+                    if world_schema.gm_tone_block:
+                        synthesis_system = world_schema.gm_tone_block + "\n\n" + GM_SYSTEM_PROMPT
+                        if self._telemetry:
+                            await self._telemetry.emit(
+                                "world_tone_injected",
+                                world=world_schema.display_name,
+                                campaign_id=campaign_id,
+                            )
+                    driftnet_channel_id = world_schema.driftnet_channel_id or ""
             except Exception as _wt_exc:
                 logger.debug("World tone injection failed (non-fatal): %s", _wt_exc)
 
@@ -373,6 +376,7 @@ class GMDirector:
             ambient_audio_key=ambient_key,
             tts_cues=tts_cues,
             channel_directive=channel_directive,
+            driftnet_channel_id=driftnet_channel_id,
         )
 
     # ── Private: Whisper Generation ───────────────────────────────────────────

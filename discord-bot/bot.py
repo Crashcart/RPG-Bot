@@ -341,6 +341,11 @@ async def _deliver_narrative(
     if directive and isinstance(user, discord.Member) and guild:
         asyncio.create_task(_handle_channel_directive(user, guild, directive))
 
+    # 7. Driftnet broadcast — mirror embed to the world's dedicated channel
+    driftnet_id = data.get("driftnet_channel_id")
+    if driftnet_id and guild:
+        asyncio.create_task(_post_to_driftnet(guild, int(driftnet_id), embed, channel.id))
+
 
 # ── 1. Paranoia Whisper System ─────────────────────────────────────────────────
 
@@ -370,6 +375,37 @@ async def _send_whisper_dm(
         )
     except Exception as exc:
         logger.warning("Whisper DM failed: %s", exc)
+
+
+# ── 7. Driftnet Broadcast ─────────────────────────────────────────────────────
+
+async def _post_to_driftnet(
+    guild:          discord.Guild,
+    driftnet_id:    int,
+    embed:          discord.Embed,
+    source_channel_id: int,
+) -> None:
+    """
+    Mirror the narrative embed to the world's driftnet channel.
+
+    Silently skips if the channel is not found, is the same as the source
+    channel (to avoid double-posting in the driftnet channel itself), or if
+    the bot lacks send permission.
+    """
+    if driftnet_id == source_channel_id:
+        return
+    try:
+        driftnet_channel = guild.get_channel(driftnet_id)
+        if driftnet_channel is None:
+            driftnet_channel = await guild.fetch_channel(driftnet_id)
+        if not isinstance(driftnet_channel, discord.TextChannel):
+            return
+        await driftnet_channel.send(embed=embed)
+        logger.debug("Driftnet: mirrored narrative to channel %d", driftnet_id)
+    except discord.Forbidden:
+        logger.debug("Driftnet: missing send permission for channel %d", driftnet_id)
+    except Exception as exc:
+        logger.warning("Driftnet broadcast failed for channel %d: %s", driftnet_id, exc)
 
 
 # ── 2. Ghost Sheet — Ephemeral Combat Threads ─────────────────────────────────

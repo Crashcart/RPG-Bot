@@ -84,6 +84,13 @@ class WorldSchema(BaseModel):
         default_factory=list,
         description="Free-form tags for filtering and discovery (e.g. ['horror', 'sci-fi'])",
     )
+    driftnet_channel_id: str = Field(
+        default="",
+        description=(
+            "Discord channel snowflake ID for this world's driftnet channel. "
+            "When set, all narration for this world is also posted there."
+        ),
+    )
     extra:          dict[str, Any] = Field(
         default_factory=dict,
         description="Arbitrary extension fields for future use",

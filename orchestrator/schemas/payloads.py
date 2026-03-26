@@ -496,6 +496,16 @@ class NarrativeResponsePayload(BaseModel):
                     "into the dungeon, prison, hospital, or back to main.",
     )
 
+    # ── Driftnet: World-bound broadcast channel ───────────────────────────
+    driftnet_channel_id: str = Field(
+        default="",
+        description=(
+            "Discord channel snowflake for this world's driftnet channel. "
+            "When set, the bot mirrors the narrative embed there in addition "
+            "to the player's own channel."
+        ),
+    )
+
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

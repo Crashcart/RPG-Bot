@@ -117,7 +117,8 @@ web_search = WebSearchService(settings)
 disk_agent = DiskAgentService(settings.world_data_dir)
 
 # ── Reality Wall (SQLite world-state + path isolation) ────────────────────────
-reality_wall = RealityWall(data_dir=settings.world_data_dir)
+# TDR §2: vault DB at /app/data/vault/scribe_core.db
+reality_wall = RealityWall(data_dir=settings.world_data_dir, vault_dir=settings.vault_dir)
 
 # ── Paradox Engine (unreliable narrator post-processor) ───────────────────────
 paradox_engine = ParadoxEngine()
@@ -127,7 +128,8 @@ _cloud_storyteller = claude if (settings.cloud_provider == "claude" and claude) 
 prophetic_buffer = PropheticBuffer(cache=cache, storyteller=_cloud_storyteller)
 
 # ── Janitor (GFS backup + media auto-prune) ───────────────────────────────────
-janitor = JanitorService(data_dir=settings.world_data_dir)
+# Python JanitorService acts as secondary janitor; primary is the Alpine container
+janitor = JanitorService(data_dir=settings.world_data_dir, backup_dir=settings.backups_dir)
 
 # ── World Registry (dynamic genre discovery + schema cache) ───────────────────
 world_registry = WorldRegistry(data_dir=settings.world_data_dir, reality_wall=reality_wall)

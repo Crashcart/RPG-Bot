@@ -1,15 +1,30 @@
 version: '3.9'
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Ironclad GM – Docker Compose
-# Storage services (ironclad-storage) are isolated from the external network.
-# Compute services (ironclad-compute) handle all external API routing.
+# Aetheris Scribe Engine — Docker Compose
+# TDR-compliant deployment. Root: /srv/aetheris_v1/
+#
+# Networks:
+#   aetheris_net   — internal bridge (all services)
+#   aetheris_store — storage-only, no external access
+#
+# Services:
+#   scribe         Discord bot + orchestrator (Python 3.11)
+#   brain          Ollama LLM (Intel GPU /dev/dri passthrough)
+#   janitor        Alpine GFS backup + 30-day media prune
+#   pulse          Flask health/status sidecar (:58291)
+#   ironclad-db    PostgreSQL 16
+#   ironclad-cache Redis 7
+#   ironclad-chroma ChromaDB (RAG)
+#   ironclad-csv-sync CSV export worker
+#   media-proxy    Static asset server (:8001)
+#   lavalink       Audio engine (:2333)
 # ─────────────────────────────────────────────────────────────────────────────
 
 networks:
-  ironclad-compute:
+  aetheris_net:
     driver: bridge
-  ironclad-storage:
+  aetheris_store:
     driver: bridge
     internal: true   # no direct external access
 
@@ -21,66 +36,122 @@ volumes:
   csv-exports:
   media-assets:
   pdf-uploads:
-  world-data:
 
 services:
 
-  # ── Orchestrator ────────────────────────────────────────────────────────────
-  ironclad-orchestrator:
+  # ── Scribe (Orchestrator — Pipeline Engine) ──────────────────────────────────
+  scribe:
     build:
       context: ./orchestrator
       dockerfile: Dockerfile
-    container_name: ironclad-orchestrator
+    container_name: aetheris-scribe
     restart: unless-stopped
     networks:
-      - ironclad-compute
-      - ironclad-storage
+      - aetheris_net
+      - aetheris_store
     ports:
       - "8000:8000"
     env_file: .env
     environment:
       - DB_HOST=ironclad-db
       - REDIS_HOST=ironclad-cache
-      - OLLAMA_HOST=http://ironclad-ollama:11434
+      - OLLAMA_HOST=http://brain:11434
       - CHROMA_HOST=ironclad-chroma
-      - MEDIA_PROXY_URL=http://media-asset-proxy:8001
+      - MEDIA_PROXY_URL=http://media-proxy:8001
       - PDF_UPLOAD_DIR=/app/pdf_uploads
+      - WORLD_DATA_DIR=/app/data
+      - LOGS_DIR=/app/logs
+      - BACKUPS_DIR=/app/backups
     depends_on:
       ironclad-db:
         condition: service_healthy
       ironclad-cache:
         condition: service_healthy
-      ironclad-ollama:
+      brain:
         condition: service_started
       ironclad-chroma:
         condition: service_started
     volumes:
+      - ./data:/app/data          # shared global data (TDR §2)
+      - ./logs:/app/logs          # structured logs
+      - ./backups:/app/backups    # GFS backup target
       - csv-exports:/app/exports
       - pdf-uploads:/app/pdf_uploads
-      - world-data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
-  # ── Discord Bot Listener ────────────────────────────────────────────────────
+  # ── Discord Bot Listener (Scribe front-end) ───────────────────────────────────
   ironclad-discord:
     build:
       context: ./discord-bot
       dockerfile: Dockerfile
-    container_name: ironclad-discord
+    container_name: aetheris-discord
     restart: unless-stopped
     networks:
-      - ironclad-compute
+      - aetheris_net
     env_file: .env
     environment:
-      - ORCHESTRATOR_URL=http://ironclad-orchestrator:8000
+      - ORCHESTRATOR_URL=http://scribe:8000
     depends_on:
-      - ironclad-orchestrator
+      scribe:
+        condition: service_healthy
+
+  # ── Brain (Ollama — Local AI, Intel GPU) ──────────────────────────────────────
+  brain:
+    image: ollama/ollama:latest
+    container_name: aetheris-brain
+    restart: unless-stopped
+    networks:
+      - aetheris_net
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_KEEP_ALIVE=24h
+    volumes:
+      - ollama-models:/root/.ollama
+    devices:
+      - /dev/dri:/dev/dri         # Intel GPU passthrough (TDR §1)
+    group_add:
+      - video
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:11434/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ── Janitor (Alpine — GFS Backup + 30-day Media Prune) ───────────────────────
+  # TDR §4: Alpine, GFS Backup Shell, 30-day Pruning Logic
+  janitor:
+    build:
+      context: ./janitor
+      dockerfile: Dockerfile
+    container_name: aetheris-janitor
+    restart: unless-stopped
+    networks:
+      - aetheris_net
+    volumes:
+      - ./data:/app/data          # read/scan data assets
+      - ./backups:/app/backups    # write GFS backups here
+      - ./logs:/app/logs          # write janitor logs
+    environment:
+      - GFS_DAILY_KEEP=7
+      - GFS_WEEKLY_KEEP=2
+      - GFS_MONTHLY_KEEP=1
+      - PRUNE_MAX_AGE_DAYS=30
+      - BACKUP_INTERVAL_HOURS=24
+      - PRUNE_INTERVAL_HOURS=6
 
   # ── PostgreSQL Database ─────────────────────────────────────────────────────
   ironclad-db:
     image: postgres:16-alpine
-    container_name: ironclad-db
+    container_name: aetheris-db
     restart: unless-stopped
     networks:
-      - ironclad-storage
+      - aetheris_store
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ironclad}
       POSTGRES_USER: ${POSTGRES_USER:-ironclad}
@@ -98,10 +169,10 @@ services:
   # ── Redis Session Cache ─────────────────────────────────────────────────────
   ironclad-cache:
     image: redis:7-alpine
-    container_name: ironclad-cache
+    container_name: aetheris-cache
     restart: unless-stopped
     networks:
-      - ironclad-storage
+      - aetheris_store
     command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD required} --save 60 1 --loglevel warning
     volumes:
       - redis-data:/data
@@ -116,10 +187,10 @@ services:
     build:
       context: ./csv-sync
       dockerfile: Dockerfile
-    container_name: ironclad-csv-sync
+    container_name: aetheris-csv-sync
     restart: unless-stopped
     networks:
-      - ironclad-storage
+      - aetheris_store
     env_file: .env
     environment:
       - DB_HOST=ironclad-db
@@ -132,35 +203,14 @@ services:
     volumes:
       - csv-exports:/app/exports
 
-  # ── Local Ollama LLM (Mechanical Engine) ───────────────────────────────────
-  ironclad-ollama:
-    image: ollama/ollama:latest
-    container_name: ironclad-ollama
-    restart: unless-stopped
-    networks:
-      - ironclad-compute
-    environment:
-      - OLLAMA_HOST=0.0.0.0
-      - OLLAMA_KEEP_ALIVE=24h
-    volumes:
-      - ollama-models:/root/.ollama
-    # Uncomment to use GPU:
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
-
   # ── ChromaDB Vector Store (RAG) ─────────────────────────────────────────────
   ironclad-chroma:
     image: chromadb/chroma:latest
-    container_name: ironclad-chroma
+    container_name: aetheris-chroma
     restart: unless-stopped
     networks:
-      - ironclad-compute
-      - ironclad-storage
+      - aetheris_net
+      - aetheris_store
     volumes:
       - chroma-data:/chroma/chroma
     environment:
@@ -168,29 +218,30 @@ services:
       - ANONYMIZED_TELEMETRY=FALSE
 
   # ── Media Asset Proxy ───────────────────────────────────────────────────────
-  media-asset-proxy:
+  media-proxy:
     build:
       context: ./media-proxy
       dockerfile: Dockerfile
-    container_name: media-asset-proxy
+    container_name: aetheris-media
     restart: unless-stopped
     networks:
-      - ironclad-compute
+      - aetheris_net
     ports:
       - "8001:8001"
     volumes:
       - media-assets:/app/assets
 
-  # ── Health Sentinel Sidecar ─────────────────────────────────────────────────
-  health-sentinel:
+  # ── Pulse (Health Sentinel — Flask Sidecar) ──────────────────────────────────
+  # TDR §5: Headless status reporting via Flask Pulse Web-UI (Port 58291)
+  pulse:
     build:
       context: ./health-sentinel
       dockerfile: Dockerfile
-    container_name: health-sentinel
+    container_name: aetheris-pulse
     restart: unless-stopped
     networks:
-      - ironclad-compute
-      - ironclad-storage
+      - aetheris_net
+      - aetheris_store
     ports:
       - "58291:58291"
     env_file: .env
@@ -199,14 +250,19 @@ services:
     depends_on:
       ironclad-cache:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:58291/ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   # ── Lavalink Audio Engine ───────────────────────────────────────────────────
   lavalink-audio:
     image: ghcr.io/lavalink-devs/lavalink:4
-    container_name: lavalink-audio
+    container_name: aetheris-lavalink
     restart: unless-stopped
     networks:
-      - ironclad-compute
+      - aetheris_net
     environment:
       - SERVER_PORT=2333
       - LAVALINK_SERVER_PASSWORD=${LAVALINK_PASSWORD:?LAVALINK_PASSWORD required}

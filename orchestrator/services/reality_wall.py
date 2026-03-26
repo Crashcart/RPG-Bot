@@ -31,10 +31,11 @@ PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
 CREATE TABLE IF NOT EXISTS world_state (
-    world_name   TEXT    PRIMARY KEY,
-    created_at   TEXT    NOT NULL,
-    updated_at   TEXT    NOT NULL,
-    metadata     TEXT    NOT NULL DEFAULT '{}'
+    world_name          TEXT    PRIMARY KEY,
+    created_at          TEXT    NOT NULL,
+    updated_at          TEXT    NOT NULL,
+    metadata            TEXT    NOT NULL DEFAULT '{}',
+    driftnet_channel_id TEXT    DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS campaign_world (
@@ -59,21 +60,23 @@ class RealityWall:
     so the service is safe to use from async context without a dedicated pool.
     """
 
-    def __init__(self, data_dir: str = "/app/data") -> None:
+    def __init__(self, data_dir: str = "/app/data", vault_dir: str | None = None) -> None:
         self._data_dir = Path(data_dir)
-        self._db_path  = self._data_dir / "reality_wall.db"
+        # TDR §2: SQLite at /app/data/vault/scribe_core.db
+        _vault = Path(vault_dir) if vault_dir else (self._data_dir / "vault")
+        self._db_path  = _vault / "scribe_core.db"
         self._lock     = asyncio.Lock()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def init(self) -> None:
-        """Create data directories and initialise the schema."""
-        self._data_dir.mkdir(parents=True, exist_ok=True)
-        (self._data_dir / "handouts").mkdir(exist_ok=True)
-        (self._data_dir / "echo_vault").mkdir(exist_ok=True)
-        (self._data_dir / "backups").mkdir(exist_ok=True)
+        """Create TDR-compliant directory tree and initialise the SQLite schema."""
+        # TDR §3: /app/data/[asset_type]/[genre_name]/
+        for asset_type in ("fonts", "templates", "handouts", "echo_vault", "vault"):
+            (self._data_dir / asset_type).mkdir(parents=True, exist_ok=True)
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
         await self._run(_ddl_init, self._db_path)
-        logger.info("RealityWall initialised at %s", self._db_path)
+        logger.info("RealityWall initialised — vault: %s", self._db_path)
 
     # ── World Registration ────────────────────────────────────────────────────
 
@@ -104,6 +107,17 @@ class RealityWall:
 
     async def get_current_world(self, campaign_id: str) -> str | None:
         row = await self._run(_get_campaign_world, self._db_path, campaign_id)
+        return row[0] if row else None
+
+    # ── Driftnet Channel Binding ──────────────────────────────────────────────
+
+    async def set_driftnet_channel(self, world_name: str, channel_id: str) -> None:
+        """Bind a Discord channel ID to a world's driftnet."""
+        await self._run(_set_driftnet, self._db_path, world_name, channel_id, _now())
+
+    async def get_driftnet_channel(self, world_name: str) -> str | None:
+        """Return the driftnet Discord channel ID for this world, or None."""
+        row = await self._run(_get_driftnet, self._db_path, world_name)
         return row[0] if row else None
 
     # ── Paradox Level ─────────────────────────────────────────────────────────
@@ -190,6 +204,23 @@ def _get_paradox(db_path: Path, campaign_id: str):
     with sqlite3.connect(db_path) as conn:
         return conn.execute(
             "SELECT level FROM paradox_level WHERE campaign_id=?", (campaign_id,)
+        ).fetchone()
+
+
+def _set_driftnet(db_path: Path, world_name: str, channel_id: str, now: str):
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO world_state(world_name, created_at, updated_at, driftnet_channel_id) "
+            "VALUES(?,?,?,?) ON CONFLICT(world_name) DO UPDATE SET "
+            "driftnet_channel_id=?, updated_at=?",
+            (world_name, now, now, channel_id, channel_id, now),
+        )
+
+
+def _get_driftnet(db_path: Path, world_name: str):
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute(
+            "SELECT driftnet_channel_id FROM world_state WHERE world_name=?", (world_name,)
         ).fetchone()
 
 
