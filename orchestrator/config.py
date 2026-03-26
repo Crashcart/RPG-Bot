@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     gemini_api_key: str
     gemini_model:   str = "gemini-1.5-pro"
 
+    # ── Anthropic Claude API ──────────────────────────────────────────────────
+    # Set CLAUDE_API_KEY and optionally CLOUD_PROVIDER=claude to use Claude as
+    # the Tier 1 storyteller instead of Gemini.  Gemini remains the default.
+    claude_api_key: str = ""
+    claude_model:   str = "claude-sonnet-4-6"
+    # cloud_provider: "gemini" (default) | "claude"
+    cloud_provider: str = "gemini"
+
     # ── ChromaDB ──────────────────────────────────────────────────────────────
     chroma_host: str = "ironclad-chroma"
     chroma_port: int = 8000
