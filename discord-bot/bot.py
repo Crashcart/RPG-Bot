@@ -8,33 +8,19 @@ with the full Living Discord immersion layer (Task 4).
 Task 4 — Living Discord Immersion Layer
 -----------------------------------------
   1. Paranoia Whisper System
-       After every turn with NPC interactions, the bot silently DMs the
-       player a 2-3 sentence private perception check — what their skeptical,
-       paranoid character notices that no one else would catch.
-
   2. Ephemeral Ghost Sheet Threads
-       Main channel receives only narrative prose.  When combat starts the
-       bot automatically opens a Discord Thread ("⚔️ Combat – Thug Alley")
-       on the narrative message.  All mechanical grit — dice rolls, damage,
-       stat changes, rulebook citations — goes inside the thread.  When the
-       fight ends the bot locks the thread.  The math is always there if you
-       want it; it never clutters the story.
-
   3. Voice Channel Puppeteering
-       The bot joins the player's voice channel.  On scene type changes it
-       loops an ambient audio track (tavern chatter, dungeon hum, combat
-       tension).  When an NPC speaks, the bot pauses the ambient, speaks the
-       NPC's dialogue via edge-tts with that Ollama node's unique voice
-       profile, then resumes ambient.
-
   4. Channel Manipulation
-       If the narrative warrants a location change (captured → dungeon,
-       escaped → main), the bot grants / revokes the player's channel
-       permissions accordingly.  Channel ID mapping is configured via env vars:
-         DUNGEON_CHANNEL_ID, PRISON_CHANNEL_ID, HOSPITAL_CHANNEL_ID,
-         MAIN_CHANNEL_ID
 
-PDF Ingestion (unchanged from Task 2):
+Async Session Features (Task 5)
+---------------------------------
+  /recap      — "Previously on…" catch-up summary delivered as an ephemeral DM
+  /downtime   — Submit a background task that resolves while the player sleeps
+  /retcon     — Admin: roll back a hallucinated action and restore character state
+  Presence    — on_presence_update tracks online/offline for Campfire Mode
+  Notifier    — Background poll loop delivers downtime results via DM
+
+PDF Ingestion:
   /upload_rulebook — explicit slash command
   Auto-detect      — any PDF attachment triggers ingestion
 """
@@ -96,12 +82,16 @@ _open_combat_threads: dict[int, int] = {}
 # Bot Class
 # ─────────────────────────────────────────────────────────────────────────────
 
+_ADMIN_ROLE_NAME = os.environ.get("ADMIN_ROLE_NAME", "GM")  # role required for /retcon
+
+
 class IroncladBot(commands.Bot):
     def __init__(self) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
         intents.voice_states    = True   # required for voice channel tracking
         intents.members         = True   # required for channel permission changes
+        intents.presences       = True   # required for Campfire Mode presence tracking
         super().__init__(command_prefix="!", intents=intents)
         self._http_client: httpx.AsyncClient | None = None
         self.voice_mgr = VoiceManager()
@@ -113,6 +103,8 @@ class IroncladBot(commands.Bot):
         )
         await self.tree.sync()
         logger.info("Slash commands synced.")
+        # Start the downtime notification poll loop
+        asyncio.create_task(_downtime_notifier_loop())
 
     async def close(self) -> None:
         for guild in self.guilds:
@@ -129,9 +121,114 @@ class IroncladBot(commands.Bot):
 
     async def on_ready(self) -> None:
         logger.info("Ironclad GM online as %s", self.user)
+        # Ghost Continuity: deliver any narratives generated while bot was offline
+        asyncio.create_task(_ghost_continuity_sync())
 
 
 bot = IroncladBot()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Presence Tracking – Campfire Mode
+# ─────────────────────────────────────────────────────────────────────────────
+
+@bot.event
+async def on_presence_update(before: discord.Member, after: discord.Member) -> None:
+    """
+    Fire-and-forget: notify the orchestrator whenever a guild member's status
+    changes so it can recalculate Campfire Mode.
+
+    We only care about online ↔ offline transitions, not game activity changes.
+    """
+    was_online = before.status != discord.Status.offline
+    is_online  = after.status  != discord.Status.offline
+    if was_online == is_online:
+        return   # Status tier didn't change (e.g. online → dnd is not offline)
+
+    try:
+        await bot.http_client.post(
+            "/api/presence",
+            json={
+                "player_id": str(after.id),
+                "guild_id":  str(after.guild.id),
+                "online":    is_online,
+            },
+        )
+    except Exception as exc:
+        logger.debug("Presence update failed for %s: %s", after.name, exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Downtime Notification Loop
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Tracks which player snowflakes we are currently polling (guild_id → set of player_ids)
+_active_downtime_players: dict[str, set[str]] = {}
+
+
+async def _downtime_notifier_loop() -> None:
+    """
+    Background loop: every 30 seconds, checks all tracked players for completed
+    downtime tasks and DMs the result.
+    """
+    while True:
+        await asyncio.sleep(30)
+        players_to_check: list[tuple[str, str]] = []  # (guild_id, player_id)
+        for guild_id, players in _active_downtime_players.items():
+            for pid in list(players):
+                players_to_check.append((guild_id, pid))
+
+        for guild_id, player_id in players_to_check:
+            try:
+                await _deliver_downtime_notifications(player_id)
+            except Exception as exc:
+                logger.debug("Downtime notifier error for %s: %s", player_id, exc)
+
+
+async def _deliver_downtime_notifications(player_id: str) -> None:
+    """Fetch pending downtime notifications and DM the player."""
+    resp = await bot.http_client.get(
+        f"/api/downtime/notifications/{player_id}"
+    )
+    if resp.status_code != 200:
+        return
+    notifications = resp.json()
+    for note in notifications:
+        task_id          = note.get("task_id")
+        result_narrative = note.get("result_narrative", "")
+        character_name   = note.get("character_name", "Your character")
+
+        # Find the Discord user object
+        user = bot.get_user(int(player_id))
+        if not user:
+            try:
+                user = await bot.fetch_user(int(player_id))
+            except Exception:
+                pass
+
+        if user:
+            embed = discord.Embed(
+                title=f"🌙 Downtime Complete — {character_name}",
+                description=result_narrative,
+                colour=0x6B4FA0,
+            )
+            embed.set_footer(text="Your character's personal timeline — only you see this.")
+            try:
+                await user.send(embed=embed)
+            except discord.Forbidden:
+                logger.debug("Could not DM downtime result to %s", player_id)
+
+        # Mark delivered regardless of DM success
+        if task_id:
+            try:
+                await bot.http_client.patch(f"/api/downtime/{task_id}/notified")
+            except Exception as exc:
+                logger.debug("Mark notified failed: %s", exc)
+
+    # Remove from tracking if no more pending tasks
+    if not notifications:
+        for players in _active_downtime_players.values():
+            players.discard(player_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -627,15 +724,40 @@ async def on_message(message: discord.Message) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @bot.tree.command(name="act", description="Declare an in-character action.")
-@app_commands.describe(action="What does your character do?")
-async def slash_act(interaction: discord.Interaction, action: str) -> None:
+@app_commands.describe(
+    action="What does your character do?",
+    image="Optional image attachment for visual context (scene photo, map, etc.).",
+)
+async def slash_act(
+    interaction: discord.Interaction,
+    action: str,
+    image: discord.Attachment | None = None,
+) -> None:
     await interaction.response.defer()
     try:
+        raw_input = action
+
+        # Visual Intel: if an image is attached, get Gemini's description first
+        if image and image.content_type and image.content_type.startswith("image/"):
+            try:
+                async with bot.http as client:
+                    vis_resp = await client.post(
+                        f"{ORCHESTRATOR_URL}/api/vision/analyse",
+                        json={"image_url": image.url, "prompt": action},
+                        timeout=30,
+                    )
+                if vis_resp.status_code == 200:
+                    visual_desc = vis_resp.json().get("description", "")
+                    if visual_desc:
+                        raw_input = f"[Visual context: {visual_desc}]\n\n{action}"
+            except Exception as vis_exc:
+                logger.warning("Visual intel failed: %s", vis_exc)
+
         data = await _dispatch_intent(
             player_id=str(interaction.user.id),
             guild_id=str(interaction.guild_id or "DM"),
             channel_id=str(interaction.channel_id),
-            raw_input=action,
+            raw_input=raw_input,
             command_type="slash_command",
             slash_data={"command_name": "act", "options": {"action": action}},
         )
@@ -670,6 +792,12 @@ async def slash_act(interaction: discord.Interaction, action: str) -> None:
         if data.get("channel_directive") and isinstance(interaction.user, discord.Member) and interaction.guild:
             asyncio.create_task(
                 _handle_channel_directive(interaction.user, interaction.guild, data["channel_directive"])
+            )
+
+        # Ghost Continuity: mark this intent delivered so it won't be re-sent on reconnect
+        if data.get("intent_id"):
+            asyncio.create_task(
+                _mark_narrative_delivered(data["intent_id"], str(interaction.guild_id or "DM"))
             )
 
     except httpx.HTTPStatusError as exc:
@@ -781,6 +909,402 @@ async def slash_upload_rulebook(
         module_name=module_name,
         campaign_id=campaign_id,
     ))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Async Session Slash Commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+@bot.tree.command(
+    name="recap",
+    description="Get a 'Previously on…' summary of everything you missed while offline.",
+)
+async def slash_recap(interaction: discord.Interaction) -> None:
+    """
+    Generates an ephemeral catch-up summary for the requesting player,
+    covering all events since their last action in this campaign.
+    Delivered as an ephemeral response (only visible to the requester).
+    """
+    await interaction.response.defer(ephemeral=True)
+
+    if not interaction.guild_id:
+        await interaction.followup.send("⚠️ This command must be used in a server.", ephemeral=True)
+        return
+
+    campaign = await _fetch_active_campaign(str(interaction.guild_id))
+    if not campaign:
+        await interaction.followup.send(
+            "⚠️ No active campaign found for this server.", ephemeral=True
+        )
+        return
+
+    try:
+        resp = await bot.http_client.post(
+            "/api/recap",
+            json={
+                "player_id":   str(interaction.user.id),
+                "guild_id":    str(interaction.guild_id),
+                "campaign_id": campaign["id"],
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.exception("Recap request failed: %s", exc)
+        await interaction.followup.send("⚠️ Could not generate recap.", ephemeral=True)
+        return
+
+    recap_text = data.get("recap_text", "No recap available.")
+    events     = data.get("events_covered", 0)
+    since_ts   = data.get("since_timestamp")
+
+    footer = f"{events} event{'s' if events != 1 else ''} summarised"
+    if since_ts:
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(since_ts.replace("Z", "+00:00"))
+            footer += f" • since {dt.strftime('%b %d, %H:%M UTC')}"
+        except Exception:
+            pass
+
+    embed = discord.Embed(
+        description=recap_text,
+        colour=0x5c8fd6,
+    ).set_footer(text=footer)
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(
+    name="downtime",
+    description="Assign your character a background task that resolves while you're offline.",
+)
+@app_commands.describe(
+    task="What does your character do during downtime? (e.g. 'research the ancient tome for 8 hours')",
+    hours="How many real-world hours until the task resolves (default: 8)",
+)
+async def slash_downtime(
+    interaction: discord.Interaction,
+    task:  str,
+    hours: int = 8,
+) -> None:
+    """
+    Submits a personal downtime task.  The GM resolves it in the background
+    and DMs the result when the timer expires.  Does not advance the main
+    story timeline.
+    """
+    await interaction.response.defer(ephemeral=True)
+
+    if not interaction.guild_id:
+        await interaction.followup.send("⚠️ This command must be used in a server.", ephemeral=True)
+        return
+
+    if hours < 1 or hours > 168:
+        await interaction.followup.send("⚠️ Duration must be between 1 and 168 hours.", ephemeral=True)
+        return
+
+    campaign = await _fetch_active_campaign(str(interaction.guild_id))
+    if not campaign:
+        await interaction.followup.send(
+            "⚠️ No active campaign found for this server.", ephemeral=True
+        )
+        return
+
+    try:
+        resp = await bot.http_client.post(
+            "/api/downtime",
+            json={
+                "player_id":      str(interaction.user.id),
+                "guild_id":       str(interaction.guild_id),
+                "campaign_id":    campaign["id"],
+                "description":    task,
+                "duration_hours": hours,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.exception("Downtime submit failed: %s", exc)
+        await interaction.followup.send("⚠️ Could not submit downtime task.", ephemeral=True)
+        return
+
+    task_id     = data.get("task_id", "?")
+    resolves_at = data.get("resolves_at", "")
+
+    # Register player for DM notifications
+    guild_id_str = str(interaction.guild_id)
+    if guild_id_str not in _active_downtime_players:
+        _active_downtime_players[guild_id_str] = set()
+    _active_downtime_players[guild_id_str].add(str(interaction.user.id))
+
+    # Format the resolution time
+    resolve_display = resolves_at
+    if resolves_at:
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(resolves_at.replace("Z", "+00:00"))
+            resolve_display = dt.strftime("%b %d at %H:%M UTC")
+        except Exception:
+            pass
+
+    embed = discord.Embed(
+        title="🌙 Downtime Task Queued",
+        description=(
+            f"**Task:** {task}\n\n"
+            f"**Resolves:** {resolve_display}\n"
+            f"**Duration:** {hours} hour{'s' if hours != 1 else ''}\n\n"
+            "The GM will run the background checks while you rest. "
+            "You'll receive a DM with the results when the timer expires.\n\n"
+            "*This task runs on your personal timeline — it won't affect the main story.*"
+        ),
+        colour=0x6B4FA0,
+    ).set_footer(text=f"Task ID: {task_id}")
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(
+    name="retcon",
+    description="[GM only] Roll back a hallucinated action and restore character state.",
+)
+@app_commands.describe(
+    intent_id="The UUID of the action to retcon (from the action log)",
+    reason="Short explanation for the retcon (for the audit trail)",
+)
+async def slash_retcon(
+    interaction: discord.Interaction,
+    intent_id:   str,
+    reason:      str = "",
+) -> None:
+    """
+    Admin command: reverses the stat changes from a specific action and marks
+    the action_log row as retconned.  Requires the GM role.
+    """
+    await interaction.response.defer(ephemeral=True)
+
+    # Verify caller has the GM/admin role
+    if isinstance(interaction.user, discord.Member):
+        has_admin = any(r.name == _ADMIN_ROLE_NAME for r in interaction.user.roles)
+    else:
+        has_admin = False
+
+    if not has_admin:
+        await interaction.followup.send(
+            f"⚠️ Only members with the **{_ADMIN_ROLE_NAME}** role can use this command.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        resp = await bot.http_client.post(
+            "/api/retcon",
+            json={
+                "intent_id": intent_id,
+                "admin_id":  str(interaction.user.id),
+                "reason":    reason,
+            },
+        )
+        if resp.status_code == 400:
+            await interaction.followup.send(
+                f"⚠️ Retcon failed: {resp.json().get('detail', 'Unknown error')}",
+                ephemeral=True,
+            )
+            return
+        resp.raise_for_status()
+        data = resp.json()
+    except httpx.HTTPStatusError as exc:
+        await interaction.followup.send(
+            f"⚠️ Retcon request failed: `{exc.response.status_code}`",
+            ephemeral=True,
+        )
+        return
+    except Exception as exc:
+        logger.exception("Retcon command failed: %s", exc)
+        await interaction.followup.send("⚠️ Internal error during retcon.", ephemeral=True)
+        return
+
+    character_id   = data.get("character_id", "unknown")
+    restored_stats = data.get("restored_stats", {})
+
+    # Build a compact stats summary (show only keys with simple values)
+    stats_lines = [
+        f"  `{k}`: {v}"
+        for k, v in list(restored_stats.items())[:8]
+        if isinstance(v, (int, float, str, bool))
+    ]
+    stats_display = "\n".join(stats_lines) if stats_lines else "  *(no numeric stats to display)*"
+
+    embed = discord.Embed(
+        title="↩️ Retcon Applied",
+        description=(
+            f"**Action rolled back:** `{intent_id}`\n"
+            f"**Character:** `{character_id}`\n"
+            f"**Reason:** {reason or '*(none provided)*'}\n\n"
+            f"**Restored stats:**\n{stats_display}\n\n"
+            "The action has been flagged in the audit log. "
+            "Story context entries (if any) must be removed manually via the Lore Archive."
+        ),
+        colour=0xFF6B35,
+    ).set_footer(text=f"Retcon by {interaction.user.display_name}")
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ghost Continuity
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _mark_narrative_delivered(intent_id: str, guild_id: str) -> None:
+    """Fire-and-forget: tell the orchestrator a pending narrative was delivered."""
+    try:
+        async with bot.http as client:
+            await client.post(
+                f"{ORCHESTRATOR_URL}/api/narrative/{intent_id}/delivered",
+                json={"guild_id": guild_id},
+                timeout=10,
+            )
+    except Exception as exc:
+        logger.warning("Could not mark narrative %s delivered: %s", intent_id, exc)
+
+
+async def _ghost_continuity_sync() -> None:
+    """On bot (re)connect, fetch and deliver any narratives that were generated
+    while the bot was offline, then mark each one delivered."""
+    await bot.wait_until_ready()
+    for guild in bot.guilds:
+        guild_id = str(guild.id)
+        try:
+            async with bot.http as client:
+                resp = await client.get(
+                    f"{ORCHESTRATOR_URL}/api/narrative/pending/{guild_id}",
+                    timeout=15,
+                )
+            if resp.status_code != 200:
+                continue
+            pending: list[dict] = resp.json().get("pending", [])
+        except Exception as exc:
+            logger.warning("Ghost continuity fetch failed for guild %s: %s", guild_id, exc)
+            continue
+
+        for item in pending:
+            intent_id  = item.get("intent_id", "")
+            channel_id = item.get("channel_id")
+            narrative  = item.get("narrative", "")
+            if not (intent_id and channel_id and narrative):
+                continue
+
+            channel = guild.get_channel(int(channel_id))
+            if channel is None:
+                continue
+
+            try:
+                embed = discord.Embed(
+                    title="📜 Missed Narrative",
+                    description=narrative[:4000],
+                    colour=0x9F6FE0,
+                ).set_footer(text="Delivered via Ghost Continuity")
+                await channel.send(embed=embed)
+                asyncio.create_task(_mark_narrative_delivered(intent_id, guild_id))
+            except Exception as exc:
+                logger.warning("Ghost delivery failed for %s: %s", intent_id, exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Player Sandbox Commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="do", description="Describe a physical action your character performs.")
+@app_commands.describe(action="The physical action your character takes.")
+async def slash_do(interaction: discord.Interaction, action: str) -> None:
+    await interaction.response.defer()
+    try:
+        data = await _dispatch_intent(
+            player_id=str(interaction.user.id),
+            guild_id=str(interaction.guild_id or "DM"),
+            channel_id=str(interaction.channel_id),
+            raw_input=f"My character physically does: {action}",
+            command_type="slash_command",
+            slash_data={"command_name": "do", "options": {"action": action}},
+        )
+        embed = _build_action_embed(data, interaction.user)
+        sent_msg = await interaction.followup.send(embed=embed, wait=True)
+
+        if data.get("whisper"):
+            asyncio.create_task(_send_whisper_dm(interaction.user, data["whisper"]))
+
+        if data.get("thread_event") and data.get("thread_content") and interaction.guild:
+            asyncio.create_task(_handle_combat_thread(
+                sent_msg=sent_msg,
+                guild=interaction.guild,
+                channel_id=interaction.channel_id,
+                thread_event=data["thread_event"],
+                thread_title=data.get("thread_title", "Action Details"),
+                thread_content=data["thread_content"],
+            ))
+
+        if isinstance(interaction.user, discord.Member) and interaction.guild and data.get("channel_directive"):
+            asyncio.create_task(
+                _handle_channel_directive(interaction.user, interaction.guild, data["channel_directive"])
+            )
+    except Exception as exc:
+        logger.exception("Slash /do failed: %s", exc)
+        await interaction.followup.send("⚠️ Internal error. Please try again.")
+
+
+@bot.tree.command(name="say", description="Speak in-character as your character.")
+@app_commands.describe(words="The words your character speaks aloud.")
+async def slash_say(interaction: discord.Interaction, words: str) -> None:
+    await interaction.response.defer()
+    try:
+        data = await _dispatch_intent(
+            player_id=str(interaction.user.id),
+            guild_id=str(interaction.guild_id or "DM"),
+            channel_id=str(interaction.channel_id),
+            raw_input=f'My character says: "{words}"',
+            command_type="slash_command",
+            slash_data={"command_name": "say", "options": {"words": words}},
+        )
+        embed = _build_action_embed(data, interaction.user)
+        await interaction.followup.send(embed=embed)
+
+        if data.get("whisper"):
+            asyncio.create_task(_send_whisper_dm(interaction.user, data["whisper"]))
+
+        if isinstance(interaction.user, discord.Member) and data.get("tts_cues"):
+            asyncio.create_task(
+                bot.voice_mgr.handle_turn_audio(
+                    interaction.user, None, data.get("tts_cues", [])
+                )
+            )
+    except Exception as exc:
+        logger.exception("Slash /say failed: %s", exc)
+        await interaction.followup.send("⚠️ Internal error. Please try again.")
+
+
+@bot.tree.command(name="insight", description="Attempt a perception or insight check on something.")
+@app_commands.describe(target="What are you trying to perceive or understand?")
+async def slash_insight(interaction: discord.Interaction, target: str) -> None:
+    await interaction.response.defer(ephemeral=True)
+    try:
+        data = await _dispatch_intent(
+            player_id=str(interaction.user.id),
+            guild_id=str(interaction.guild_id or "DM"),
+            channel_id=str(interaction.channel_id),
+            raw_input=f"I attempt an insight/perception check on: {target}",
+            command_type="slash_command",
+            slash_data={"command_name": "insight", "options": {"target": target}},
+        )
+        embed = _build_action_embed(data, interaction.user)
+        embed.title = f"🔍 Insight: {target[:60]}"
+        embed.set_footer(text="Only you can see this result.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+        # Private whisper for deep secrets
+        if data.get("whisper"):
+            asyncio.create_task(_send_whisper_dm(interaction.user, data["whisper"]))
+    except Exception as exc:
+        logger.exception("Slash /insight failed: %s", exc)
+        await interaction.followup.send("⚠️ Internal error. Please try again.", ephemeral=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

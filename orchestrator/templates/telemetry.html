@@ -1,0 +1,332 @@
+{% extends "base.html" %}
+{% block title %}Live Telemetry{% endblock %}
+{% block content %}
+
+<style>
+  /* ── Telemetry Terminal ──────────────────────────────────────────────────── */
+  .telem-layout { display: grid; grid-template-columns: 1fr 220px; gap: 12px; align-items: start; }
+  @media (max-width: 800px) { .telem-layout { grid-template-columns: 1fr; } }
+
+  .terminal-wrap {
+    background: #08080e; border: 1px solid var(--border);
+    border-radius: var(--radius); overflow: hidden;
+  }
+  .terminal-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 14px; background: #0e0e18; border-bottom: 1px solid var(--border);
+  }
+  .terminal-title { font-size: 12px; font-weight: 600; color: var(--muted); }
+  .terminal-controls { display: flex; gap: 8px; align-items: center; }
+  .conn-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--border); flex-shrink: 0;
+    transition: background 0.3s;
+  }
+  .conn-dot.connected { background: var(--green); box-shadow: 0 0 5px var(--green); }
+  .conn-dot.error { background: var(--red); }
+  .conn-label { font-size: 11px; color: var(--muted); }
+
+  #terminal {
+    height: 560px; overflow-y: auto; padding: 10px 14px;
+    font-family: 'Courier New', monospace; font-size: 12px;
+    line-height: 1.6;
+  }
+  #terminal::-webkit-scrollbar { width: 4px; }
+  #terminal::-webkit-scrollbar-track { background: transparent; }
+  #terminal::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 4px; }
+
+  .log-line { display: flex; gap: 10px; margin-bottom: 1px; }
+  .log-ts { color: #44445a; flex-shrink: 0; user-select: none; }
+  .log-type {
+    flex-shrink: 0; width: 110px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.04em; font-size: 10px;
+    padding-top: 1px;
+  }
+  .log-msg { color: #ccccd6; word-break: break-all; }
+
+  /* Type colours */
+  .t-storyteller_selected { color: #5c8fd6; }
+  .t-planning_done        { color: #c9a84c; }
+  .t-sub_agent_dispatch   { color: #9f6fe0; }
+  .t-synthesis_start      { color: #66667a; }
+  .t-synthesis_done       { color: #4caf78; }
+  .t-directive_fired      { color: #e0a830; }
+  .t-pipeline_complete    { color: #4cef88; }
+  .t-campfire_changed     { color: #e07c30; }
+  .t-retcon_applied       { color: #cf4c5a; }
+  .t-node_promoted        { color: #a0e0ff; }
+  .t-error                { color: #cf4c5a; font-weight: 700; }
+  .t-default              { color: #66667a; }
+
+  .empty-terminal {
+    display: flex; align-items: center; justify-content: center;
+    height: 100%; color: #2a2a3a;
+    font-size: 13px; font-style: italic;
+  }
+
+  /* Sidebar stats */
+  .stat-box {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 12px 14px; margin-bottom: 10px;
+  }
+  .stat-box-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; }
+  .counter-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; }
+  .counter-key { font-size: 11px; color: var(--muted); }
+  .counter-val { font-size: 13px; font-weight: 700; font-family: 'Courier New', monospace; color: var(--text); }
+
+  .ctrl-btn {
+    width: 100%; padding: 7px; font-size: 11px; font-weight: 600;
+    border-radius: var(--radius); border: 1px solid var(--border);
+    background: transparent; color: var(--muted); cursor: pointer;
+    font-family: inherit; transition: all 0.15s; margin-bottom: 6px;
+  }
+  .ctrl-btn:hover { color: var(--text); border-color: #404060; }
+  .ctrl-btn.active { color: var(--gold); border-color: rgba(201,168,76,0.4); }
+
+  .filter-section { margin-top: 12px; }
+  .filter-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; }
+  .filter-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .filter-row label { font-size: 11px; color: var(--muted); cursor: pointer; margin: 0; text-transform: none; letter-spacing: 0; }
+  .filter-row input[type="checkbox"] { accent-color: var(--gold); cursor: pointer; }
+</style>
+
+<div class="page-header">
+  <h1><span>📡</span> Live Telemetry</h1>
+  <p>Real-time WebSocket terminal — pipeline events, sub-agent routing, and API calls.</p>
+</div>
+
+<div class="telem-layout">
+
+  <!-- Terminal -->
+  <div>
+    <div class="terminal-wrap">
+      <div class="terminal-bar">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="conn-dot" id="connDot"></span>
+          <span class="conn-label" id="connLabel">Connecting…</span>
+        </div>
+        <div class="terminal-controls">
+          <span style="font-size:10px;color:var(--muted)" id="lineCount">0 events</span>
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:11px;color:var(--muted);margin:0">
+            <input type="checkbox" id="autoScroll" checked style="accent-color:var(--gold)">
+            auto-scroll
+          </label>
+        </div>
+      </div>
+      <div id="terminal">
+        <div class="empty-terminal" id="emptyMsg">Waiting for pipeline events…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sidebar -->
+  <div>
+    <!-- Connection + controls -->
+    <div class="stat-box">
+      <div class="stat-box-label">Controls</div>
+      <button class="ctrl-btn" onclick="clearTerminal()">🗑 Clear Terminal</button>
+      <button class="ctrl-btn" id="pauseBtn" onclick="togglePause()">⏸ Pause Feed</button>
+    </div>
+
+    <!-- Live counters -->
+    <div class="stat-box">
+      <div class="stat-box-label">Session Counts</div>
+      <div class="counter-row">
+        <span class="counter-key">Pipelines</span>
+        <span class="counter-val" id="cnt-pipeline_complete">0</span>
+      </div>
+      <div class="counter-row">
+        <span class="counter-key">API Calls</span>
+        <span class="counter-val" id="cnt-storyteller_selected">0</span>
+      </div>
+      <div class="counter-row">
+        <span class="counter-key">Sub-Agents</span>
+        <span class="counter-val" id="cnt-sub_agent_dispatch">0</span>
+      </div>
+      <div class="counter-row">
+        <span class="counter-key">Directives Fired</span>
+        <span class="counter-val" id="cnt-directive_fired">0</span>
+      </div>
+      <div class="counter-row">
+        <span class="counter-key">Retcons</span>
+        <span class="counter-val" id="cnt-retcon_applied">0</span>
+      </div>
+      <div class="counter-row">
+        <span class="counter-key">Errors</span>
+        <span class="counter-val" id="cnt-error" style="color:var(--red)">0</span>
+      </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="stat-box">
+      <div class="filter-label">Event Filters</div>
+      <div class="filter-section" id="filterList">
+        <!-- populated by JS -->
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const EVENT_META = {
+  storyteller_selected: { label: "STORYTELLER",  cls: "t-storyteller_selected",  fmt: d => `${d.storyteller} selected for campaign ${d.campaign_id || '?'}` },
+  planning_done:        { label: "PLANNING",      cls: "t-planning_done",         fmt: d => `${d.sub_tasks || 0} sub-task(s) planned` },
+  sub_agent_dispatch:   { label: "SUB-AGENT",     cls: "t-sub_agent_dispatch",    fmt: d => `${d.count || 0} agent(s) dispatched — ${d.actors || ''}` },
+  synthesis_start:      { label: "SYNTHESIS",     cls: "t-synthesis_start",       fmt: d => `Starting Tier 1 synthesis pass` },
+  synthesis_done:       { label: "SYNTHESIS ✓",   cls: "t-synthesis_done",        fmt: d => `${d.length || 0} chars • ${d.stripped || 0} pattern(s) stripped` },
+  directive_fired:      { label: "DIRECTIVE",     cls: "t-directive_fired",       fmt: d => `${d.count || 1} directive(s) consumed — campaign ${d.campaign_id || '?'}` },
+  pipeline_complete:    { label: "PIPELINE ✓",    cls: "t-pipeline_complete",     fmt: d => `${d.outcome || ''} in ${d.duration_ms || '?'}ms — intent ${(d.intent_id || '').slice(0,8)}` },
+  campfire_changed:     { label: "CAMPFIRE",      cls: "t-campfire_changed",      fmt: d => `Mode ${d.active ? 'ACTIVATED' : 'deactivated'} — guild ${d.guild_id || '?'}` },
+  retcon_applied:       { label: "RETCON",        cls: "t-retcon_applied",        fmt: d => `Rolled back intent ${(d.intent_id || '').slice(0,8)} by ${d.admin_id || '?'}` },
+  node_promoted:        { label: "NODE PROMOTED", cls: "t-node_promoted",         fmt: d => `${d.node_name || '?'} promoted to Tier 1 storyteller (${d.ttft_ms || '?'}ms TTFT)` },
+  error:                { label: "ERROR",         cls: "t-error",                 fmt: d => d.message || JSON.stringify(d) },
+};
+const DEFAULT_META = { label: "EVENT", cls: "t-default", fmt: d => JSON.stringify(d) };
+
+const ALL_TYPES = Object.keys(EVENT_META);
+let hiddenTypes = new Set();
+let paused = false;
+let lineCount = 0;
+const counters = {};
+
+// Build filter checkboxes
+const filterList = document.getElementById('filterList');
+ALL_TYPES.forEach(type => {
+  const row = document.createElement('div');
+  row.className = 'filter-row';
+  const id = `filter-${type}`;
+  row.innerHTML = `
+    <input type="checkbox" id="${id}" checked onchange="toggleFilter('${type}', this.checked)">
+    <label for="${id}" class="${EVENT_META[type].cls}">${EVENT_META[type].label}</label>
+  `;
+  filterList.appendChild(row);
+});
+
+function toggleFilter(type, show) {
+  if (show) hiddenTypes.delete(type);
+  else hiddenTypes.add(type);
+  // Re-apply to existing lines
+  document.querySelectorAll(`.log-line[data-type="${type}"]`).forEach(el => {
+    el.style.display = show ? '' : 'none';
+  });
+}
+
+function togglePause() {
+  paused = !paused;
+  const btn = document.getElementById('pauseBtn');
+  btn.textContent = paused ? '▶ Resume Feed' : '⏸ Pause Feed';
+  btn.classList.toggle('active', paused);
+}
+
+function clearTerminal() {
+  const term = document.getElementById('terminal');
+  term.innerHTML = '<div class="empty-terminal" id="emptyMsg">Terminal cleared.</div>';
+  lineCount = 0;
+  document.getElementById('lineCount').textContent = '0 events';
+  Object.keys(counters).forEach(k => {
+    counters[k] = 0;
+    const el = document.getElementById(`cnt-${k}`);
+    if (el) el.textContent = '0';
+  });
+}
+
+function fmtTs(isoStr) {
+  try {
+    const d = new Date(isoStr);
+    return d.toTimeString().slice(0, 8);
+  } catch { return '??:??:??'; }
+}
+
+function appendEvent(ev) {
+  if (paused) return;
+  const meta = EVENT_META[ev.type] || DEFAULT_META;
+  const hidden = hiddenTypes.has(ev.type);
+
+  // Remove empty-state placeholder
+  const empty = document.getElementById('emptyMsg');
+  if (empty) empty.remove();
+
+  const term = document.getElementById('terminal');
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  line.setAttribute('data-type', ev.type);
+  if (hidden) line.style.display = 'none';
+
+  let msgStr;
+  try { msgStr = meta.fmt(ev); } catch { msgStr = JSON.stringify(ev); }
+
+  line.innerHTML =
+    `<span class="log-ts">${fmtTs(ev.ts)}</span>` +
+    `<span class="log-type ${meta.cls}">${meta.label}</span>` +
+    `<span class="log-msg">${escHtml(msgStr)}</span>`;
+  term.appendChild(line);
+
+  lineCount++;
+  document.getElementById('lineCount').textContent = `${lineCount} event${lineCount === 1 ? '' : 's'}`;
+
+  // Update counters
+  if (!counters[ev.type]) counters[ev.type] = 0;
+  counters[ev.type]++;
+  const cEl = document.getElementById(`cnt-${ev.type}`);
+  if (cEl) cEl.textContent = counters[ev.type];
+
+  // Auto-scroll
+  if (document.getElementById('autoScroll').checked) {
+    term.scrollTop = term.scrollHeight;
+  }
+
+  // Cap at 2000 lines to prevent DOM blowup
+  const lines = term.querySelectorAll('.log-line');
+  if (lines.length > 2000) lines[0].remove();
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// WebSocket
+let ws = null;
+let reconnectDelay = 2000;
+
+function connect() {
+  const dot   = document.getElementById('connDot');
+  const label = document.getElementById('connLabel');
+  dot.className   = 'conn-dot';
+  label.textContent = 'Connecting…';
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws/telemetry`);
+
+  ws.onopen = () => {
+    dot.className   = 'conn-dot connected';
+    label.textContent = 'Connected';
+    reconnectDelay  = 2000;
+  };
+
+  ws.onmessage = (evt) => {
+    try {
+      const ev = JSON.parse(evt.data);
+      appendEvent(ev);
+    } catch (e) {
+      console.error('Telemetry parse error:', e);
+    }
+  };
+
+  ws.onclose = () => {
+    dot.className   = 'conn-dot error';
+    label.textContent = `Disconnected — reconnecting in ${reconnectDelay/1000}s…`;
+    setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+  };
+
+  ws.onerror = () => {
+    dot.className   = 'conn-dot error';
+    label.textContent = 'Connection error';
+  };
+}
+
+connect();
+</script>
+
+{% endblock %}

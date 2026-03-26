@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 
 from orchestrator.schemas.payloads import (
     CharacterSnapshot,
+    GMDirective,
     NarrativeResponsePayload,
     OllamaResolutionPayload,
     StateCommitPayload,
@@ -41,12 +42,13 @@ class NarrationPhase:
 
     async def narrate(
         self,
-        resolution:      OllamaResolutionPayload,
-        commit:          StateCommitPayload,
-        character:       CharacterSnapshot,
-        player_intent:   str,
-        campaign_system: str,
-        campaign_id:     str,
+        resolution:        OllamaResolutionPayload,
+        commit:            StateCommitPayload,
+        character:         CharacterSnapshot,
+        player_intent:     str,
+        campaign_system:   str,
+        campaign_id:       str,
+        active_directives: list[GMDirective] | None = None,
     ) -> NarrativeResponsePayload:
         """Delegate Phase 4 entirely to the GM Director."""
         return await self._gm.narrate(
@@ -56,4 +58,5 @@ class NarrationPhase:
             player_intent=player_intent,
             campaign_system=campaign_system,
             campaign_id=campaign_id,
+            active_directives=active_directives,
         )

@@ -130,6 +130,11 @@ to dice rolls or game mechanics in the prose.
 5. LETHAL OUTCOME PROTOCOL — If status_change is "DEAD", the narration must \
 unambiguously describe the character's death. No ambiguity. No survival left open.
 
+6. ANTI-RAILROADING MANDATE — You manage the WORLD'S REACTIONS only. \
+You MUST NOT write what the player character thinks, feels, says, or decides to do. \
+Write NPC actions, environment changes, and mechanical consequences. \
+End every response leaving the player an open choice. Hand agency back.
+
 Begin your response immediately with the narrative prose. No preamble.
 """
 
@@ -198,6 +203,11 @@ prose.
 5. LETHAL OUTCOME PROTOCOL — If status_change is "DEAD", the narration must \
 clearly and permanently describe the character's death. No ambiguity. \
 No possibility of survival left open.
+
+6. ANTI-RAILROADING MANDATE — You manage the WORLD'S REACTIONS only. \
+You MUST NOT write what the player character thinks, feels, says, or decides to do. \
+Write NPC actions, environment changes, and mechanical consequences. \
+End every response leaving the player an open choice. Hand agency back.
 
 Begin your response immediately with the narrative prose. No preamble.
 """

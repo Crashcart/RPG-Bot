@@ -60,14 +60,17 @@ import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from orchestrator.services.gemini_client  import GeminiClient
-    from orchestrator.services.node_router    import NodeRouter
-    from orchestrator.services.story_memory   import StoryMemoryService
-    from orchestrator.services.sub_agent_dispatcher import SubAgentDispatcher
+    from orchestrator.services.claude_client         import ClaudeClient
+    from orchestrator.services.gemini_client         import GeminiClient
+    from orchestrator.services.node_router           import NodeRouter
+    from orchestrator.services.story_memory          import StoryMemoryService
+    from orchestrator.services.sub_agent_dispatcher  import SubAgentDispatcher
+    from orchestrator.services.telemetry             import TelemetryService
 
 import asyncio
 
 from orchestrator.prompts.gm_prompts import (
+    GM_DIRECTIVE_BLOCK,
     GM_PLANNING_PROMPT,
     GM_PLANNING_SYSTEM_PROMPT,
     GM_STAT_CHANGE_BLOCK,
@@ -88,6 +91,7 @@ from orchestrator.schemas.payloads import (
     ActionOutcome,
     ChannelDirective,
     CharacterSnapshot,
+    GMDirective,
     GMPlanResult,
     ThreadEvent,
     TTSCue,
@@ -117,26 +121,33 @@ class GMDirector:
 
     def __init__(
         self,
-        gemini:      "GeminiClient",
-        node_router: "NodeRouter",
-        dispatcher:  "SubAgentDispatcher",
-        story_memory: "StoryMemoryService",
+        gemini:         "GeminiClient",
+        node_router:    "NodeRouter",
+        dispatcher:     "SubAgentDispatcher",
+        story_memory:   "StoryMemoryService",
+        telemetry:      "TelemetryService | None" = None,
+        claude:         "ClaudeClient | None" = None,
+        cloud_provider: str = "gemini",
     ) -> None:
-        self._gemini       = gemini
-        self._node_router  = node_router
-        self._dispatcher   = dispatcher
-        self._story_memory = story_memory
+        self._gemini         = gemini
+        self._claude         = claude
+        self._cloud_provider = cloud_provider
+        self._node_router    = node_router
+        self._dispatcher     = dispatcher
+        self._story_memory   = story_memory
+        self._telemetry      = telemetry
 
     # ── Public Interface ───────────────────────────────────────────────────────
 
     async def narrate(
         self,
-        resolution:      OllamaResolutionPayload,
-        commit:          StateCommitPayload,
-        character:       CharacterSnapshot,
-        player_intent:   str,
-        campaign_system: str,
-        campaign_id:     str,
+        resolution:       OllamaResolutionPayload,
+        commit:           StateCommitPayload,
+        character:        CharacterSnapshot,
+        player_intent:    str,
+        campaign_system:  str,
+        campaign_id:      str,
+        active_directives: list["GMDirective"] | None = None,
     ) -> NarrativeResponsePayload:
         """
         Full GM Director pipeline: plan → delegate → synthesize → filter.
@@ -146,6 +157,13 @@ class GMDirector:
         # ── Select Tier 1 Storyteller ──────────────────────────────────────────
         storyteller = await self._select_storyteller()
         storyteller_name = getattr(storyteller, "_node_name", "gemini-cloud")
+
+        if self._telemetry:
+            await self._telemetry.emit(
+                "storyteller_selected",
+                storyteller=storyteller_name,
+                campaign_id=campaign_id,
+            )
 
         # ── Story Memory Retrieval ─────────────────────────────────────────────
         story_context = await self._story_memory.retrieve_relevant_context(
@@ -168,8 +186,24 @@ class GMDirector:
             storyteller_name, len(plan.sub_tasks),
         )
 
+        if self._telemetry:
+            await self._telemetry.emit(
+                "planning_done",
+                sub_tasks=len(plan.sub_tasks),
+                direct_elements=len(plan.direct_elements),
+                storyteller=storyteller_name,
+            )
+
         # ── Step 4b: Sub-Agent Dispatch ────────────────────────────────────────
         sub_results = await self._dispatcher.dispatch_all(plan.sub_tasks)
+
+        if self._telemetry and plan.sub_tasks:
+            actor_names = ", ".join(t.entity_name for t in plan.sub_tasks[:5])
+            await self._telemetry.emit(
+                "sub_agent_dispatch",
+                count=len(plan.sub_tasks),
+                actors=actor_names,
+            )
 
         # Log any brand violations for operator review
         for r in sub_results:
@@ -195,7 +229,11 @@ class GMDirector:
             else "  (None specified — all scene content came from sub-agents.)"
         )
 
+        # Build directive block for World Architect injection
+        directive_block = _build_directive_block(active_directives)
+
         synthesis_prompt = GM_SYNTHESIS_PROMPT.format(
+            directive_block=directive_block,
             mechanical_context=mech_context,
             story_context=story_block,
             player_action=player_intent,
@@ -205,6 +243,9 @@ class GMDirector:
         )
 
         # Fire synthesis and whisper concurrently — whisper adds zero latency
+        if self._telemetry:
+            await self._telemetry.emit("synthesis_start", storyteller=storyteller_name)
+
         has_npc_tasks = any(r.task.task_type == "npc_dialogue" for r in sub_results)
         synthesis_coro = storyteller.generate(
             system_prompt=GM_SYSTEM_PROMPT,
@@ -220,6 +261,15 @@ class GMDirector:
 
         # ── Step 4d: Structural Text Filter ───────────────────────────────────
         final_narrative, stripped_count = _strip_structural_text(raw_narrative)
+
+        if self._telemetry:
+            await self._telemetry.emit(
+                "synthesis_done",
+                length=len(final_narrative),
+                stripped=stripped_count,
+                storyteller=storyteller_name,
+            )
+
         if stripped_count:
             logger.warning(
                 "GM synthesis output contained %d structural pattern(s); stripped. "
@@ -329,20 +379,27 @@ class GMDirector:
         """
         Return the Tier 1 storyteller for this turn.
 
-        Cloud ON  → GeminiClient
+        Cloud ON + provider=claude → ClaudeClient (if configured)
+        Cloud ON + provider=gemini → GeminiClient (default)
         Cloud OFF → Auto-promoted fastest Ollama narrative node (TTFT order)
-        OFF + no node → GeminiClient (with a warning)
+        OFF + no node → cloud fallback (with a warning)
         """
         use_cloud = await self._node_router.is_storyteller_enabled()
         if use_cloud:
+            if self._cloud_provider == "claude" and self._claude is not None:
+                return self._claude
             return self._gemini
 
         local = await self._node_router.get_storyteller_client()
         if local is None:
+            cloud_name = "Claude" if self._cloud_provider == "claude" and self._claude else "Gemini"
             logger.warning(
                 "GM Director: Cloud Storyteller is OFF but no narrative-tagged node is available. "
-                "Falling back to Gemini. Tag at least one Ollama node with role='narrative'."
+                "Falling back to %s. Tag at least one Ollama node with role='narrative'.",
+                cloud_name,
             )
+            if self._cloud_provider == "claude" and self._claude is not None:
+                return self._claude
             return self._gemini
 
         return local
@@ -600,6 +657,21 @@ def _build_thread_event(
         return ThreadEvent.COMBAT, title, content
 
     return None, "Encounter Details", None
+
+
+def _build_directive_block(directives: list | None) -> str:
+    """
+    Build the [WORLD ARCHITECT DIRECTIVE] injection block for the synthesis prompt.
+    Returns an empty string when there are no active directives so the prompt
+    format() call is always clean.
+    """
+    if not directives:
+        return ""
+    lines = []
+    for d in directives:
+        type_label = d.directive_type.value.replace("_", " ").upper()
+        lines.append(f"[{type_label}] {d.directive_text}")
+    return GM_DIRECTIVE_BLOCK.format(directives="\n".join(lines))
 
 
 def _infer_ambient_audio_key(resolution: OllamaResolutionPayload) -> str | None:

@@ -55,6 +55,26 @@ except when delivering deep backstory in a character's memory or recollection.
 
 6. OUTPUT PROSE ONLY — begin immediately with the narrative. No preamble. \
 No "Certainly!", no "Here is the narrative:", no sign-off. Pure prose, nothing else.
+
+7. ANTI-RAILROADING MANDATE (PLAYER AGENCY LOCK) — You manage the WORLD'S REACTIONS. \
+You do not write the STORY. The distinction is absolute and non-negotiable:
+
+   YOU MAY write:
+     • NPC actions, decisions, and dialogue (e.g. "The guard's hand moves to his sword hilt.")
+     • Environmental changes (e.g. "The bridge groans — a crack splits the stone mid-span.")
+     • Consequences of what the player already did (e.g. "The explosion tears through the room.")
+     • World-state shifts that are the direct result of this turn's mechanical outcome.
+
+   YOU ARE STRICTLY FORBIDDEN from writing:
+     • What the player CHARACTER thinks or feels ("You feel afraid." is forbidden.)
+     • What the player CHARACTER says ("You shout back at the guard." is forbidden.)
+     • What the player CHARACTER decides to do ("You turn and run." is forbidden.)
+     • Any action the player has not explicitly declared this turn.
+
+   MANDATORY CLOSE — every narrative response MUST end at a point where the player \
+has a clear, open choice ahead of them. Do not close the scene. Do not make decisions \
+on the player's behalf. Hand agency back, always. The final sentence must describe \
+the state of the world or an NPC's action — never the player's next move.
 """
 
 # ── Planning Pass ─────────────────────────────────────────────────────────────
@@ -108,7 +128,7 @@ return {{"sub_tasks": [], "direct_elements": ["full scene"]}}.
 
 GM_SYNTHESIS_PROMPT = """\
 Weave the following assembled scene elements into a single, seamless narrative passage.
-
+{directive_block}
 === MECHANICAL CONTEXT [INTERNAL — DO NOT ECHO INTO PROSE] ===
 {mechanical_context}
 
@@ -126,7 +146,23 @@ Weave the following assembled scene elements into a single, seamless narrative p
 {stat_change_block}
 Write the final narrative passage now. \
 Apply all immersion rules. Present tense. Second person. \
-No structural formatting. Begin immediately with prose.\
+No structural formatting. Anti-railroading mandate enforced — do not write player actions. \
+Begin immediately with prose.\
+"""
+
+# Injected into synthesis when admin backchannel directives are pending for this campaign.
+# Appears at the very top of the synthesis prompt — highest priority input.
+GM_DIRECTIVE_BLOCK = """\
+=== WORLD ARCHITECT DIRECTIVE [HIGHEST PRIORITY — WEAVE INTO THIS SCENE UNCONDITIONALLY] ===
+The following instruction(s) have been issued by the World Architect (Game Admin) \
+through the private backchannel.  You MUST honour every directive in this block. \
+They take precedence over all other scene context.  Integrate each directive \
+naturally into the narrative — do NOT announce it, do NOT break immersion, \
+do NOT attribute it to a meta source.  It simply happens in the world.
+
+{directives}
+=== END WORLD ARCHITECT DIRECTIVES ===
+
 """
 
 # Injected into synthesis only when stat_deltas or inventory_delta is non-empty

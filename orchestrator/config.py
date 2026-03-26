@@ -47,12 +47,29 @@ class Settings(BaseSettings):
     gemini_api_key: str
     gemini_model:   str = "gemini-1.5-pro"
 
+    # ── Anthropic Claude API ──────────────────────────────────────────────────
+    # Set CLAUDE_API_KEY and optionally CLOUD_PROVIDER=claude to use Claude as
+    # the Tier 1 storyteller instead of Gemini.  Gemini remains the default.
+    claude_api_key: str = ""
+    claude_model:   str = "claude-sonnet-4-6"
+    # cloud_provider: "gemini" (default) | "claude"
+    cloud_provider: str = "gemini"
+
     # ── ChromaDB ──────────────────────────────────────────────────────────────
     chroma_host: str = "ironclad-chroma"
     chroma_port: int = 8000
 
     # ── Media Proxy ───────────────────────────────────────────────────────────
     media_proxy_url: str = "http://media-asset-proxy:8001"
+
+    # ── Web Search (optional — DuckDuckGo used as free fallback) ─────────────
+    # Set SERPAPI_KEY for full web results via SerpAPI, or leave blank for
+    # DuckDuckGo Instant Answers (no key required).
+    serpapi_key: str = ""
+
+    # ── Disk Agency (AI file sandbox) ─────────────────────────────────────────
+    # Directory the GM AI can write world artifacts to (maps, session notes…)
+    world_data_dir: str = "/app/world_data"
 
     # ── App ───────────────────────────────────────────────────────────────────
     log_level:          str = "INFO"

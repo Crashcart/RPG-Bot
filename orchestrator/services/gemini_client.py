@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 
@@ -71,6 +72,64 @@ class GeminiClient:
         except (KeyError, IndexError) as exc:
             logger.error("Unexpected Gemini response in generate(): %s", json.dumps(data)[:400])
             raise ValueError("Could not extract text from Gemini response.") from exc
+
+    # ── Visual Intel — Image Analysis ────────────────────────────────────────
+
+    async def generate_with_image(
+        self,
+        system_prompt: str,
+        user_prompt:   str,
+        image_url:     str,
+        max_tokens:    int = 400,
+    ) -> str:
+        """
+        Analyse an image URL using Gemini Vision.
+
+        Downloads the image, base64-encodes it, and sends it alongside the
+        text prompt.  Returns a text description/analysis of the image.
+
+        Used by:
+          • Discord Visual Intel: player attaches an image to /act
+          • GM Sandbox: admin drags an image into the chat for GM analysis
+        """
+        async with httpx.AsyncClient(timeout=20) as client:
+            img_resp = await client.get(image_url)
+            img_resp.raise_for_status()
+        image_bytes   = img_resp.content
+        image_b64     = base64.b64encode(image_bytes).decode()
+        # Detect MIME type from Content-Type header or URL extension
+        content_type  = img_resp.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+
+        payload = {
+            "system_instruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{
+                "parts": [
+                    {"inline_data": {"mime_type": content_type, "data": image_b64}},
+                    {"text": user_prompt},
+                ]
+            }],
+            "generationConfig": {
+                "temperature":     0.6,
+                "maxOutputTokens": max_tokens,
+            },
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HARASSMENT",         "threshold": "BLOCK_NONE"},
+            ],
+        }
+        # Vision is supported by gemini-1.5-pro and gemini-1.5-flash
+        url = f"{_GEMINI_API_BASE}/{self._model}:generateContent?key={self._api_key}"
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+
+        data = response.json()
+        try:
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except (KeyError, IndexError) as exc:
+            logger.error("Gemini vision response parse error: %s", json.dumps(data)[:400])
+            raise ValueError("Could not extract vision analysis from Gemini response.") from exc
 
     async def generate_narrative(
         self, request: NarrativeRequestPayload

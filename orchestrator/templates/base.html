@@ -218,11 +218,24 @@
     <span class="sigil">⚔</span> Ironclad GM
   </a>
   <div class="nav-links">
-    <a href="/web/"     {% if page == 'dashboard' %}class="active"{% endif %}>Dashboard</a>
-    <a href="/web/rules"{% if page == 'rules'     %}class="active"{% endif %}>Rules</a>
-    <a href="/web/lore" {% if page == 'lore'      %}class="active"{% endif %}>Lore</a>
-    <a href="/web/log"  {% if page == 'log'       %}class="active"{% endif %}>Action Log</a>
+    <a href="/web/"            {% if page == 'dashboard'   %}class="active"{% endif %}>Dashboard</a>
+    <a href="/web/rules"       {% if page == 'rules'       %}class="active"{% endif %}>Rules</a>
+    <a href="/web/lore"        {% if page == 'lore'        %}class="active"{% endif %}>Lore</a>
+    <a href="/web/log"         {% if page == 'log'         %}class="active"{% endif %}>Action Log</a>
+    <a href="/web/nodes"       {% if page == 'nodes'       %}class="active"{% endif %}>Nodes</a>
+    <a href="/web/backchannel" {% if page == 'backchannel' %}class="active"{% endif %}>🔮 Backchannel</a>
+    <a href="/web/sandbox"    {% if page == 'sandbox'     %}class="active"{% endif %}>🔬 Sandbox</a>
+    <a href="/web/telemetry"  {% if page == 'telemetry'   %}class="active"{% endif %}>📡 Telemetry</a>
   </div>
+  <form method="post" action="/web/logout" style="margin-left:8px">
+    <button type="submit" style="
+      background:none;border:1px solid var(--border);color:var(--muted);
+      padding:5px 12px;border-radius:var(--radius);font-size:12px;
+      cursor:pointer;font-family:inherit;transition:all 0.15s;
+    " onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">
+      Logout
+    </button>
+  </form>
 </nav>
 
 <div class="container">

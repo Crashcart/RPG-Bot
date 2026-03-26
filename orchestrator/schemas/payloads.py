@@ -566,3 +566,176 @@ class PipelineResult(BaseModel):
     commit:      StateCommitPayload
     narrative:   NarrativeResponsePayload
     pipeline_duration_ms: int = 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Async Session Feature Schemas
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Chronicle Recap ───────────────────────────────────────────────────────────
+
+class RecapRequest(BaseModel):
+    """
+    Request a 'Previously on…' catch-up summary for a player who was offline.
+    The orchestrator queries everything in action_log and story_context that
+    occurred after the player's last message, then asks Gemini to produce a
+    concise bulleted summary.
+    """
+    player_id:   str = Field(..., description="Discord snowflake of the requesting player")
+    guild_id:    str = Field(..., description="Discord server snowflake")
+    campaign_id: str = Field(..., description="Campaign UUID")
+
+
+class RecapResponse(BaseModel):
+    """Ephemeral 'Previously on…' summary delivered to the requesting player."""
+    player_id:        str
+    campaign_id:      str
+    recap_text:       str   = Field(..., description="Bulleted narrative summary")
+    events_covered:   int   = Field(default=0, description="Number of action_log rows summarised")
+    since_timestamp:  datetime | None = Field(
+        default=None,
+        description="The timestamp of the player's last action (recap covers everything after this)",
+    )
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ── Campfire Mode ─────────────────────────────────────────────────────────────
+
+class PresenceUpdate(BaseModel):
+    """Posted by the Discord bot whenever a player's online status changes."""
+    player_id:  str  = Field(..., description="Discord snowflake")
+    guild_id:   str  = Field(..., description="Discord server snowflake")
+    online:     bool = Field(..., description="True = came online, False = went offline")
+
+
+class CampfireStatus(BaseModel):
+    """
+    Current Campfire Mode state for a guild.
+    When active, the pipeline allows only 'downtime RP' actions and refuses
+    to advance the main narrative past the current scene.
+    """
+    guild_id:        str
+    active:          bool        = False
+    absent_players:  list[str]   = Field(
+        default_factory=list,
+        description="Discord snowflakes of offline players who triggered campfire mode",
+    )
+    checked_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ── Async Downtime Tasks ──────────────────────────────────────────────────────
+
+class DowntimeSubmitRequest(BaseModel):
+    """
+    Submitted by a player via /downtime before they log off.
+    The GM resolves the task in the background while the player sleeps.
+    """
+    player_id:      str = Field(..., description="Discord snowflake")
+    guild_id:       str = Field(..., description="Discord server snowflake")
+    campaign_id:    str = Field(..., description="Campaign UUID")
+    description:    str = Field(
+        ...,
+        description="What the character does during downtime, in the player's own words",
+        max_length=1000,
+    )
+    duration_hours: int = Field(
+        default=8,
+        ge=1,
+        le=168,
+        description="Real-world hours before the task resolves (default 8 = overnight)",
+    )
+
+
+class DowntimeTaskStatus(BaseModel):
+    """Current state of a single downtime task."""
+    task_id:          str
+    description:      str
+    status:           str   = Field(..., description="pending | resolving | complete | failed")
+    duration_hours:   int
+    submitted_at:     datetime
+    resolves_at:      datetime
+    resolved_at:      datetime | None = None
+    result_narrative: str | None      = None
+    notified:         bool            = False
+
+
+class DowntimePendingNotification(BaseModel):
+    """
+    Returned by /api/downtime/notifications — the Discord bot polls this
+    endpoint, DMs the player, then marks the notification delivered.
+    """
+    task_id:          str
+    player_id:        str
+    result_narrative: str
+    character_name:   str = ""
+
+
+# ── Retcon ────────────────────────────────────────────────────────────────────
+
+class RetconRequest(BaseModel):
+    """
+    Admin request to roll back a specific action and restore pre-action state.
+    The action_log row is flagged retconned=TRUE (never deleted) for audit purposes.
+    """
+    intent_id:    str = Field(..., description="UUID of the action_log entry to retcon")
+    admin_id:     str = Field(..., description="Discord snowflake of the admin issuing the retcon")
+    reason:       str = Field(default="", description="Short explanation for the audit log")
+
+
+class RetconResponse(BaseModel):
+    """Confirmation that a retcon was applied successfully."""
+    intent_id:       str
+    character_id:    str
+    restored_stats:  dict[str, Any]
+    retconned_at:    datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin Backchannel Schemas
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DirectiveType(str, Enum):
+    SCENE_DIRECTIVE = "scene_directive"   # trigger env event next scene
+    NPC_HINT        = "npc_hint"          # have NPC drop a specific hint
+    WORLD_EVENT     = "world_event"       # something happens in the world right now
+    PACING_NOTE     = "pacing_note"       # "make this moment feel climactic"
+    CORRECTION      = "correction"        # subtle fix without railroading
+
+
+class GMDirectiveRequest(BaseModel):
+    """
+    An OOC (Out-of-Character) admin command sent through the White Portal
+    Backchannel to the GM Engine.  The GM weaves it into the next player
+    action's narrative as a high-priority world-management event.
+
+    This is the ONLY channel through which an admin can influence the story
+    mechanically.  Admin accounts in Discord are treated as standard players
+    (Fair Play Sandbox).
+    """
+    campaign_id:     str           = Field(..., description="Campaign UUID")
+    admin_id:        str           = Field(..., description="Admin Discord snowflake")
+    directive_type:  DirectiveType = Field(default=DirectiveType.SCENE_DIRECTIVE)
+    directive_text:  str           = Field(
+        ...,
+        description="Plain-English instruction to the GM Engine",
+        max_length=800,
+    )
+    priority:        int           = Field(
+        default=5,
+        ge=1,
+        le=10,
+        description="Injection urgency: 10 = inject unconditionally, 1 = only if scene context fits",
+    )
+
+
+class GMDirective(BaseModel):
+    """A single GM directive record, as stored in the database."""
+    directive_id:    str
+    campaign_id:     str
+    admin_id:        str
+    directive_type:  DirectiveType
+    directive_text:  str
+    priority:        int
+    status:          str  = "pending"    # pending | consumed | cancelled
+    submitted_at:    datetime
+    consumed_at:     datetime | None = None
