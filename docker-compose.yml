@@ -21,6 +21,7 @@ volumes:
   csv-exports:
   media-assets:
   pdf-uploads:
+  world-data:
 
 services:
 
@@ -56,6 +57,7 @@ services:
     volumes:
       - csv-exports:/app/exports
       - pdf-uploads:/app/pdf_uploads
+      - world-data:/app/data
 
   # ── Discord Bot Listener ────────────────────────────────────────────────────
   ironclad-discord:
@@ -178,6 +180,25 @@ services:
       - "8001:8001"
     volumes:
       - media-assets:/app/assets
+
+  # ── Health Sentinel Sidecar ─────────────────────────────────────────────────
+  health-sentinel:
+    build:
+      context: ./health-sentinel
+      dockerfile: Dockerfile
+    container_name: health-sentinel
+    restart: unless-stopped
+    networks:
+      - ironclad-compute
+      - ironclad-storage
+    ports:
+      - "58291:58291"
+    env_file: .env
+    environment:
+      - REDIS_HOST=ironclad-cache
+    depends_on:
+      ironclad-cache:
+        condition: service_healthy
 
   # ── Lavalink Audio Engine ───────────────────────────────────────────────────
   lavalink-audio:

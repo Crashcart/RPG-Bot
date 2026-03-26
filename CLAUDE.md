@@ -5,7 +5,7 @@ Self-hosted AI Game Master for tabletop RPGs on Discord. Four-phase pipeline: In
 ## Project Layout
 
 ```
-orchestrator/       FastAPI pipeline engine (main.py ~936 lines)
+orchestrator/       FastAPI pipeline engine
   config.py         Pydantic settings (all env vars)
   schemas/
     payloads.py     Single source of truth for all inter-service payload schemas
@@ -14,6 +14,12 @@ orchestrator/       FastAPI pipeline engine (main.py ~936 lines)
     adjudication.py Phase 2 — Ollama mechanical resolution
     state_commit.py Phase 3 — atomic PostgreSQL writes
     narration.py    Phase 4 — GM Director + sub-agent dispatch
+  services/
+    reality_wall.py     SQLite world-state store + path isolation
+    paradox_engine.py   Unreliable narrator injection (paradox_level 1–10)
+    prophetic_buffer.py Predictive asset pre-generation background worker
+    janitor.py          GFS backup rotation + media auto-prune cron
+    claude_client.py    Anthropic Claude Tier 1 storyteller (alt. to Gemini)
   prompts/          GM system prompts, immersion rules, guardrails
 discord-bot/
   bot.py            Discord listener, embed delivery, immersion handlers
@@ -23,9 +29,20 @@ db/
   migrations/       001–009 SQL migrations (latest: 009_admin_auth.sql)
 csv-sync/           CSV export worker
 media-proxy/        Static asset server (:8001)
+health-sentinel/    Flask sidecar on :58291 — reports busy/ok status
 lavalink/           Audio engine config
-docker-compose.yml  Full stack (10 services)
+docker-compose.yml  Full stack (11 services)
 ```
+
+## Critical Logic Modules
+
+| Module | Role |
+|--------|------|
+| `RealityWall` | SQLite (WAL) world-state registry. Tracks `current_world` per campaign, enforces `data/handouts/{world}/` and `data/echo_vault/{world}/` path isolation. Also owns `paradox_level` per campaign. |
+| `PropheticBuffer` | Fire-and-forget background worker enqueued after every pipeline turn. Pre-generates text snippets and ambient audio keys for the most likely follow-up action; results cached in Redis (TTL 120 s). |
+| `ParadoxEngine` | Stateless post-processor applied by GMDirector after Step 4d. Scales unreliable-narrator artefacts to `paradox_level` 1–10 (1 = passthrough, 10 = full breakdown). |
+| `JanitorService` | Two background loops: GFS backup (daily/weekly/monthly rotation of `reality_wall.db`) and media auto-prune (delete `.png/.mp3/.mp4` > 30 days from handouts + echo_vault). |
+| `HealthSentinel` | Flask sidecar on `:58291`. Reads `ironclad:sentinel:busy` from Redis; returns `{"status":"busy"}` while Phase 2 AI adjudication is running, `{"status":"ok"}` otherwise. |
 
 ## Key Architectural Rules
 

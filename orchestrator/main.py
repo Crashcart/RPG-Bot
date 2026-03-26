@@ -73,7 +73,11 @@ from orchestrator.services import (
     TelemetryService,
     WebSearchService,
 )
-from orchestrator.services.pdf_processor import PDFProcessorService
+from orchestrator.services.janitor         import JanitorService
+from orchestrator.services.paradox_engine  import ParadoxEngine
+from orchestrator.services.prophetic_buffer import PropheticBuffer
+from orchestrator.services.reality_wall    import RealityWall
+from orchestrator.services.pdf_processor   import PDFProcessorService
 
 # ─────────────────────────────────────────────────────────────────────────────
 settings = get_settings()
@@ -110,6 +114,19 @@ web_search = WebSearchService(settings)
 # ── Disk Agent Service ────────────────────────────────────────────────────────
 disk_agent = DiskAgentService(settings.world_data_dir)
 
+# ── Reality Wall (SQLite world-state + path isolation) ────────────────────────
+reality_wall = RealityWall(data_dir=settings.world_data_dir)
+
+# ── Paradox Engine (unreliable narrator post-processor) ───────────────────────
+paradox_engine = ParadoxEngine()
+
+# ── Prophetic Buffer (predictive asset pre-generation) ────────────────────────
+_cloud_storyteller = claude if (settings.cloud_provider == "claude" and claude) else gemini
+prophetic_buffer = PropheticBuffer(cache=cache, storyteller=_cloud_storyteller)
+
+# ── Janitor (GFS backup + media auto-prune) ───────────────────────────────────
+janitor = JanitorService(data_dir=settings.world_data_dir)
+
 # ── Tier 1: GM Director (Central Storyteller) ─────────────────────────────────
 # Selects the storyteller per-turn (Gemini or auto-promoted Ollama), runs the
 # planning pass, dispatches sub-agents, synthesizes, and applies immersion filters.
@@ -121,6 +138,8 @@ gm_director = GMDirector(
     telemetry=telemetry_svc,
     claude=claude,
     cloud_provider=settings.cloud_provider,
+    reality_wall=reality_wall,
+    paradox_engine=paradox_engine,
 )
 
 # Pipeline phase singletons
@@ -162,6 +181,9 @@ async def lifespan(app: FastAPI):
     await rag.connect()
     await story_memory.connect(db.pool)
     await node_router.start()   # begin background health-check loop
+    await reality_wall.init()   # create SQLite schema + data dirs
+    await prophetic_buffer.start()
+    await janitor.start()
 
     # Initialise async-session services now that db.pool is live
     global chronicle, campfire, downtime, retcon, backchannel, auth, sandbox
@@ -194,6 +216,8 @@ async def lifespan(app: FastAPI):
         await resolver_task
     except asyncio.CancelledError:
         pass
+    await prophetic_buffer.stop()
+    await janitor.stop()
     await node_router.stop()
     await db.disconnect()
     await cache.disconnect()
@@ -355,7 +379,17 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
         context = await ingestion.assemble(intent, campaign_id)
 
         # ── Phase 2: Mechanical Adjudication ──────────────────────────────────
+        # Signal Health Sentinel: heavy AI task in flight
+        _sentinel_key = "ironclad:sentinel:busy"
+        try:
+            await cache._redis.set(_sentinel_key, "adjudication", ex=60)
+        except Exception:
+            pass
         resolution = await adjudication.resolve(context)
+        try:
+            await cache._redis.delete(_sentinel_key)
+        except Exception:
+            pass
 
         # ── Phase 3: State Commitment ─────────────────────────────────────────
         commit = await state_commit.commit(resolution)
@@ -417,6 +451,19 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
             outcome=resolution.outcome.value,
             campaign_id=campaign_id,
         )
+
+        # ── Prophetic Buffer: fire-and-forget prefetch for next turn ──────────
+        try:
+            _pipeline_result = PipelineResult(
+                intent=intent,
+                resolution=resolution,
+                commit=commit,
+                narrative=narrative,
+                pipeline_duration_ms=duration_ms,
+            )
+            await prophetic_buffer.enqueue(_pipeline_result)
+        except Exception as _pb_exc:
+            logger.debug("PropheticBuffer enqueue failed (non-fatal): %s", _pb_exc)
 
         # ── Ghost Continuity: cache for offline Discord bot delivery ──────────
         # Key expires in 1 hour; bot marks delivered via /api/narrative/delivered
