@@ -343,7 +343,7 @@ async def _deliver_narrative(
 
     # 7. Driftnet broadcast — mirror embed to the world's dedicated channel
     driftnet_id = data.get("driftnet_channel_id")
-    if driftnet_id and guild:
+    if driftnet_id and guild and str(driftnet_id).isdigit():
         asyncio.create_task(_post_to_driftnet(guild, int(driftnet_id), embed, channel.id))
 
 
@@ -776,8 +776,7 @@ async def slash_act(
         # Visual Intel: if an image is attached, get Gemini's description first
         if image and image.content_type and image.content_type.startswith("image/"):
             try:
-                async with bot.http as client:
-                    vis_resp = await client.post(
+                vis_resp = await bot.http_client.post(
                         f"{ORCHESTRATOR_URL}/api/vision/analyse",
                         json={"image_url": image.url, "prompt": action},
                         timeout=30,
@@ -1193,12 +1192,11 @@ async def slash_retcon(
 async def _mark_narrative_delivered(intent_id: str, guild_id: str) -> None:
     """Fire-and-forget: tell the orchestrator a pending narrative was delivered."""
     try:
-        async with bot.http as client:
-            await client.post(
-                f"{ORCHESTRATOR_URL}/api/narrative/{intent_id}/delivered",
-                json={"guild_id": guild_id},
-                timeout=10,
-            )
+        await bot.http_client.post(
+            f"{ORCHESTRATOR_URL}/api/narrative/{intent_id}/delivered",
+            json={"guild_id": guild_id},
+            timeout=10,
+        )
     except Exception as exc:
         logger.warning("Could not mark narrative %s delivered: %s", intent_id, exc)
 
@@ -1210,8 +1208,7 @@ async def _ghost_continuity_sync() -> None:
     for guild in bot.guilds:
         guild_id = str(guild.id)
         try:
-            async with bot.http as client:
-                resp = await client.get(
+            resp = await bot.http_client.get(
                     f"{ORCHESTRATOR_URL}/api/narrative/pending/{guild_id}",
                     timeout=15,
                 )

@@ -79,7 +79,7 @@ class JanitorService:
         while True:
             await asyncio.sleep(_BACKUP_INTERVAL)
             try:
-                await asyncio.get_event_loop().run_in_executor(None, self._run_backup)
+                await asyncio.get_running_loop().run_in_executor(None, self._run_backup)
             except Exception as exc:
                 logger.error("JanitorService backup error: %s", exc)
 
@@ -150,7 +150,7 @@ class JanitorService:
         while True:
             await asyncio.sleep(_PRUNE_INTERVAL)
             try:
-                await asyncio.get_event_loop().run_in_executor(None, self._run_prune)
+                await asyncio.get_running_loop().run_in_executor(None, self._run_prune)
             except Exception as exc:
                 logger.error("JanitorService prune error: %s", exc)
 
@@ -182,7 +182,7 @@ class JanitorService:
 
     async def force_backup(self) -> str:
         """Trigger a GFS backup immediately. Returns the backup filename."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._run_backup)
         backups = sorted(self._backup_dir.glob("reality_wall_*.db"))
         return backups[-1].name if backups else "no backup created"
@@ -190,7 +190,7 @@ class JanitorService:
     async def force_prune(self) -> int:
         """Trigger a media prune immediately. Returns count of deleted files."""
         # Patch cutoff inside executor is awkward — run directly
-        loop    = asyncio.get_event_loop()
+        loop    = asyncio.get_running_loop()
         before  = sum(1 for b in _PRUNE_BUCKETS
                       for _ in (self._data_dir / b).rglob("*")
                       if _.is_file() and _.suffix.lower() in _PRUNE_EXTENSIONS)

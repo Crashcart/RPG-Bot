@@ -158,7 +158,7 @@ class RealityWall:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     async def _run(self, fn, *args):
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         async with self._lock:
             return await loop.run_in_executor(None, fn, *args)
 
