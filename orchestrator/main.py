@@ -78,7 +78,7 @@ from orchestrator.services.paradox_engine   import ParadoxEngine
 from orchestrator.services.prophetic_buffer import PropheticBuffer
 from orchestrator.services.reality_wall     import RealityWall
 from orchestrator.services.rolling_vault    import RollingVault
-from orchestrator.services.sic              import SICResult, SystemIntegrityCheck
+from orchestrator.services.sic              import SystemIntegrityCheck
 from orchestrator.services.world_registry   import WorldRegistry
 from orchestrator.services.pdf_processor    import PDFProcessorService
 from orchestrator.schemas.world_schema      import WorldSchema, WorldSwitchRequest, WorldSwitchResponse

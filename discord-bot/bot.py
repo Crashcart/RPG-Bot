@@ -109,6 +109,14 @@ class IroncladBot(commands.Bot):
     async def close(self) -> None:
         for guild in self.guilds:
             await self.voice_mgr.disconnect(guild.id)
+        # Cancel all Time Dilation worker tasks
+        for worker_task in _guild_workers.values():
+            if not worker_task.done():
+                worker_task.cancel()
+        if _guild_workers:
+            await asyncio.gather(*_guild_workers.values(), return_exceptions=True)
+        _guild_queues.clear()
+        _guild_workers.clear()
         if self._http_client:
             await self._http_client.aclose()
         await super().close()
@@ -123,6 +131,14 @@ class IroncladBot(commands.Bot):
         logger.info("Ironclad GM online as %s", self.user)
         # Ghost Continuity: deliver any narratives generated while bot was offline
         asyncio.create_task(_ghost_continuity_sync())
+
+    async def on_guild_remove(self, guild: discord.Guild) -> None:
+        """Clean up Time Dilation queue/worker when the bot is removed from a guild."""
+        guild_id = str(guild.id)
+        worker = _guild_workers.pop(guild_id, None)
+        if worker and not worker.done():
+            worker.cancel()
+        _guild_queues.pop(guild_id, None)
 
 
 bot = IroncladBot()
@@ -965,41 +981,59 @@ async def slash_act(
 @bot.tree.command(name="status", description="Check your character's current stats.")
 async def slash_status(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
-    try:
-        data = await _dispatch_intent(
-            player_id=str(interaction.user.id),
-            guild_id=str(interaction.guild_id or "DM"),
-            channel_id=str(interaction.channel_id),
-            raw_input="Check my character's current status and stats.",
-            command_type="slash_command",
-            slash_data={"command_name": "status", "options": {}},
-        )
+    guild_id = str(interaction.guild_id or "DM")
+
+    async def _run_status() -> None:
+        try:
+            data = await _dispatch_intent(
+                player_id=str(interaction.user.id),
+                guild_id=guild_id,
+                channel_id=str(interaction.channel_id),
+                raw_input="Check my character's current status and stats.",
+                command_type="slash_command",
+                slash_data={"command_name": "status", "options": {}},
+            )
+            await interaction.followup.send(
+                embed=_build_action_embed(data, interaction.user), ephemeral=True
+            )
+        except Exception as exc:
+            logger.exception("Slash /status failed: %s", exc)
+            await interaction.followup.send("⚠️ Could not retrieve status.", ephemeral=True)
+
+    if not await _enqueue_action(guild_id, _run_status()):
         await interaction.followup.send(
-            embed=_build_action_embed(data, interaction.user), ephemeral=True
+            "⚠️ The GM's processing queue is full. Please try again in a moment.",
+            ephemeral=True,
         )
-    except Exception as exc:
-        logger.exception("Slash /status failed: %s", exc)
-        await interaction.followup.send("⚠️ Could not retrieve status.", ephemeral=True)
 
 
 @bot.tree.command(name="inventory", description="View your character's inventory.")
 async def slash_inventory(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
-    try:
-        data = await _dispatch_intent(
-            player_id=str(interaction.user.id),
-            guild_id=str(interaction.guild_id or "DM"),
-            channel_id=str(interaction.channel_id),
-            raw_input="List all items in my character's inventory.",
-            command_type="slash_command",
-            slash_data={"command_name": "inventory", "options": {}},
-        )
+    guild_id = str(interaction.guild_id or "DM")
+
+    async def _run_inventory() -> None:
+        try:
+            data = await _dispatch_intent(
+                player_id=str(interaction.user.id),
+                guild_id=guild_id,
+                channel_id=str(interaction.channel_id),
+                raw_input="List all items in my character's inventory.",
+                command_type="slash_command",
+                slash_data={"command_name": "inventory", "options": {}},
+            )
+            await interaction.followup.send(
+                embed=_build_action_embed(data, interaction.user), ephemeral=True
+            )
+        except Exception as exc:
+            logger.exception("Slash /inventory failed: %s", exc)
+            await interaction.followup.send("⚠️ Could not retrieve inventory.", ephemeral=True)
+
+    if not await _enqueue_action(guild_id, _run_inventory()):
         await interaction.followup.send(
-            embed=_build_action_embed(data, interaction.user), ephemeral=True
+            "⚠️ The GM's processing queue is full. Please try again in a moment.",
+            ephemeral=True,
         )
-    except Exception as exc:
-        logger.exception("Slash /inventory failed: %s", exc)
-        await interaction.followup.send("⚠️ Could not retrieve inventory.", ephemeral=True)
 
 
 @bot.tree.command(name="upload_rulebook", description="Upload a PDF rulebook for the GM to use.")
@@ -1368,94 +1402,126 @@ async def _ghost_continuity_sync() -> None:
 @app_commands.describe(action="The physical action your character takes.")
 async def slash_do(interaction: discord.Interaction, action: str) -> None:
     await interaction.response.defer()
-    try:
-        data = await _dispatch_intent(
-            player_id=str(interaction.user.id),
-            guild_id=str(interaction.guild_id or "DM"),
-            channel_id=str(interaction.channel_id),
-            raw_input=f"My character physically does: {action}",
-            command_type="slash_command",
-            slash_data={"command_name": "do", "options": {"action": action}},
-        )
-        embed = _build_action_embed(data, interaction.user)
-        sent_msg = await interaction.followup.send(embed=embed, wait=True)
+    guild_id = str(interaction.guild_id or "DM")
+    guild    = interaction.guild
+    user     = interaction.user
+    channel_id = interaction.channel_id
 
-        if data.get("whisper"):
-            asyncio.create_task(_send_whisper_dm(interaction.user, data["whisper"]))
-
-        if data.get("thread_event") and data.get("thread_content") and interaction.guild:
-            asyncio.create_task(_handle_combat_thread(
-                sent_msg=sent_msg,
-                guild=interaction.guild,
-                channel_id=interaction.channel_id,
-                thread_event=data["thread_event"],
-                thread_title=data.get("thread_title", "Action Details"),
-                thread_content=data["thread_content"],
-            ))
-
-        if isinstance(interaction.user, discord.Member) and interaction.guild and data.get("channel_directive"):
-            asyncio.create_task(
-                _handle_channel_directive(interaction.user, interaction.guild, data["channel_directive"])
+    async def _run_do() -> None:
+        try:
+            data = await _dispatch_intent(
+                player_id=str(user.id),
+                guild_id=guild_id,
+                channel_id=str(channel_id),
+                raw_input=f"My character physically does: {action}",
+                command_type="slash_command",
+                slash_data={"command_name": "do", "options": {"action": action}},
             )
-    except Exception as exc:
-        logger.exception("Slash /do failed: %s", exc)
-        await interaction.followup.send("⚠️ Internal error. Please try again.")
+            embed = _build_action_embed(data, user)
+            sent_msg = await interaction.followup.send(embed=embed, wait=True)
+
+            if data.get("whisper"):
+                asyncio.create_task(_send_whisper_dm(user, data["whisper"]))
+
+            if data.get("thread_event") and data.get("thread_content") and guild:
+                asyncio.create_task(_handle_combat_thread(
+                    sent_msg=sent_msg,
+                    guild=guild,
+                    channel_id=channel_id,
+                    thread_event=data["thread_event"],
+                    thread_title=data.get("thread_title", "Action Details"),
+                    thread_content=data["thread_content"],
+                ))
+
+            if isinstance(user, discord.Member) and guild and data.get("channel_directive"):
+                asyncio.create_task(
+                    _handle_channel_directive(user, guild, data["channel_directive"])
+                )
+        except Exception as exc:
+            logger.exception("Slash /do failed: %s", exc)
+            await interaction.followup.send("⚠️ Internal error. Please try again.")
+
+    if not await _enqueue_action(guild_id, _run_do()):
+        await interaction.followup.send(
+            "⚠️ The GM's processing queue is full. Please try again in a moment.",
+            ephemeral=True,
+        )
 
 
 @bot.tree.command(name="say", description="Speak in-character as your character.")
 @app_commands.describe(words="The words your character speaks aloud.")
 async def slash_say(interaction: discord.Interaction, words: str) -> None:
     await interaction.response.defer()
-    try:
-        data = await _dispatch_intent(
-            player_id=str(interaction.user.id),
-            guild_id=str(interaction.guild_id or "DM"),
-            channel_id=str(interaction.channel_id),
-            raw_input=f'My character says: "{words}"',
-            command_type="slash_command",
-            slash_data={"command_name": "say", "options": {"words": words}},
-        )
-        embed = _build_action_embed(data, interaction.user)
-        await interaction.followup.send(embed=embed)
+    guild_id = str(interaction.guild_id or "DM")
+    user     = interaction.user
 
-        if data.get("whisper"):
-            asyncio.create_task(_send_whisper_dm(interaction.user, data["whisper"]))
-
-        if isinstance(interaction.user, discord.Member) and data.get("tts_cues"):
-            asyncio.create_task(
-                bot.voice_mgr.handle_turn_audio(
-                    interaction.user, None, data.get("tts_cues", [])
-                )
+    async def _run_say() -> None:
+        try:
+            data = await _dispatch_intent(
+                player_id=str(user.id),
+                guild_id=guild_id,
+                channel_id=str(interaction.channel_id),
+                raw_input=f'My character says: "{words}"',
+                command_type="slash_command",
+                slash_data={"command_name": "say", "options": {"words": words}},
             )
-    except Exception as exc:
-        logger.exception("Slash /say failed: %s", exc)
-        await interaction.followup.send("⚠️ Internal error. Please try again.")
+            embed = _build_action_embed(data, user)
+            await interaction.followup.send(embed=embed)
+
+            if data.get("whisper"):
+                asyncio.create_task(_send_whisper_dm(user, data["whisper"]))
+
+            if isinstance(user, discord.Member) and data.get("tts_cues"):
+                asyncio.create_task(
+                    bot.voice_mgr.handle_turn_audio(
+                        user, None, data.get("tts_cues", [])
+                    )
+                )
+        except Exception as exc:
+            logger.exception("Slash /say failed: %s", exc)
+            await interaction.followup.send("⚠️ Internal error. Please try again.")
+
+    if not await _enqueue_action(guild_id, _run_say()):
+        await interaction.followup.send(
+            "⚠️ The GM's processing queue is full. Please try again in a moment.",
+            ephemeral=True,
+        )
 
 
 @bot.tree.command(name="insight", description="Attempt a perception or insight check on something.")
 @app_commands.describe(target="What are you trying to perceive or understand?")
 async def slash_insight(interaction: discord.Interaction, target: str) -> None:
     await interaction.response.defer(ephemeral=True)
-    try:
-        data = await _dispatch_intent(
-            player_id=str(interaction.user.id),
-            guild_id=str(interaction.guild_id or "DM"),
-            channel_id=str(interaction.channel_id),
-            raw_input=f"I attempt an insight/perception check on: {target}",
-            command_type="slash_command",
-            slash_data={"command_name": "insight", "options": {"target": target}},
-        )
-        embed = _build_action_embed(data, interaction.user)
-        embed.title = f"🔍 Insight: {target[:60]}"
-        embed.set_footer(text="Only you can see this result.")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+    guild_id = str(interaction.guild_id or "DM")
+    user     = interaction.user
 
-        # Private whisper for deep secrets
-        if data.get("whisper"):
-            asyncio.create_task(_send_whisper_dm(interaction.user, data["whisper"]))
-    except Exception as exc:
-        logger.exception("Slash /insight failed: %s", exc)
-        await interaction.followup.send("⚠️ Internal error. Please try again.", ephemeral=True)
+    async def _run_insight() -> None:
+        try:
+            data = await _dispatch_intent(
+                player_id=str(user.id),
+                guild_id=guild_id,
+                channel_id=str(interaction.channel_id),
+                raw_input=f"I attempt an insight/perception check on: {target}",
+                command_type="slash_command",
+                slash_data={"command_name": "insight", "options": {"target": target}},
+            )
+            embed = _build_action_embed(data, user)
+            embed.title = f"🔍 Insight: {target[:60]}"
+            embed.set_footer(text="Only you can see this result.")
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+            # Private whisper for deep secrets
+            if data.get("whisper"):
+                asyncio.create_task(_send_whisper_dm(user, data["whisper"]))
+        except Exception as exc:
+            logger.exception("Slash /insight failed: %s", exc)
+            await interaction.followup.send("⚠️ Internal error. Please try again.", ephemeral=True)
+
+    if not await _enqueue_action(guild_id, _run_insight()):
+        await interaction.followup.send(
+            "⚠️ The GM's processing queue is full. Please try again in a moment.",
+            ephemeral=True,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
