@@ -1,0 +1,9 @@
+{
+  "display_name": "Pirate Borg",
+  "primary_color": "#FFD700",
+  "narrative_tone": "grimdark pirate chaos",
+  "description": "The seas are cursed. The horizon promises nothing but hunger. Undead crews haunt the shipping lanes; eldritch horrors rise from the Brine. You are not a hero — you are a scoundrel, a killer, a desperate soul chasing treasure and running from debts. Your ship is rotten. Your crew is mutinous. The storm is always coming. Make it count.",
+  "system": "pirate_borg",
+  "dice_notation": "d6",
+  "tags": ["pirate", "grimdark", "chaos", "nautical", "osr"]
+}

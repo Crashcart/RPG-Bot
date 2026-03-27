@@ -199,8 +199,13 @@ class OllamaClient:
                     )
             vehicle_block = "\nVEHICLE / ASSET CONTEXT:\n" + "\n".join(vehicle_lines) + "\n"
 
+        rolling_block = ""
+        if ctx.rolling_context:
+            rolling_block = f"PRIOR SESSION CONTEXT:\n{ctx.rolling_context}\n\n"
+
         return (
             f"ACTIVE SYSTEM: {char.system}\n\n"
+            f"{rolling_block}"
             f"CHARACTER STATE:\n{json.dumps(char.stats, indent=2)}\n\n"
             f"INVENTORY (mechanical fields only):\n{inventory_text}\n"
             f"{vehicle_block}\n"

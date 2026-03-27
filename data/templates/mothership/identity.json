@@ -1,0 +1,9 @@
+{
+  "display_name": "Mothership",
+  "primary_color": "#FF4500",
+  "narrative_tone": "grimdark sci-fi horror",
+  "description": "You are adrift in a dying universe. Humanity has spread to the stars only to find them cold, hungry, and indifferent. Corporate wardens chase profits through the black. Ancient things stir in the ruins of dead civilisations. Fear is the only honest response — but you have a job to do.",
+  "system": "mothership",
+  "dice_notation": "percentile",
+  "tags": ["sci-fi", "horror", "survival", "corporate", "space"]
+}

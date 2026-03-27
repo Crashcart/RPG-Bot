@@ -1,0 +1,9 @@
+{
+  "display_name": "Shadowrun",
+  "primary_color": "#00FF88",
+  "narrative_tone": "cyberpunk noir with magic",
+  "description": "The year is 2080. Magic returned. Megacorporations carved the world into their private fiefdoms. Elves run street gangs; dragons sit on corporate boards. You are a Shadowrunner — a deniable asset doing dirty work for people who pay well enough to ask no questions. Neon bleeds into rain. The Matrix hums beneath everything. Watch your back.",
+  "system": "shadowrun_6e",
+  "dice_notation": "d6 pool",
+  "tags": ["cyberpunk", "fantasy", "urban", "noir", "heist"]
+}

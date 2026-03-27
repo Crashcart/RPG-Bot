@@ -145,22 +145,31 @@ def build_local_narrative_prompt(
     system: str,
     mechanical_truth_json: str,
     story_context_lines: list[str] | None = None,
+    world_tone_block: str = "",
 ) -> str:
     """
     Construct the system prompt for the local Ollama narrative node.
     Structurally identical to the Gemini prompt but with uncensored mode
     granted and the cloud safety preamble removed.
+
+    Args:
+        world_tone_block: Dynamic tone/description from WorldSchema.gm_tone_block.
     """
     if story_context_lines:
         story_block = "\n".join(f"   • {line}" for line in story_context_lines)
     else:
         story_block = _LOCAL_NO_STORY_CONTEXT
 
-    return _LOCAL_NARRATIVE_TEMPLATE.format(
+    base = _LOCAL_NARRATIVE_TEMPLATE.format(
         system=system,
         mechanical_truth_json=mechanical_truth_json,
         story_context_block=story_block,
     )
+
+    if world_tone_block:
+        return world_tone_block + "\n\n" + base
+
+    return base
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -219,6 +228,7 @@ def build_narrative_system_prompt(
     system: str,
     mechanical_truth_json: str,
     story_context_lines: list[str] | None = None,
+    world_tone_block: str = "",
 ) -> str:
     """
     Construct the Gemini system prompt for a specific game system,
@@ -228,6 +238,8 @@ def build_narrative_system_prompt(
         system:               Active TTRPG system name (e.g. "D&D 5e").
         mechanical_truth_json: JSON string of the MechanicalTruth payload.
         story_context_lines:  List of pre-formatted fact strings, one per line.
+        world_tone_block:     Dynamic tone/description from WorldSchema.gm_tone_block.
+                              Injected before the mechanical truth lock when non-empty.
 
     Returns:
         The fully rendered system prompt string.
@@ -237,8 +249,15 @@ def build_narrative_system_prompt(
     else:
         story_block = _NO_STORY_CONTEXT
 
-    return _NARRATIVE_SYSTEM_TEMPLATE.format(
+    base = _NARRATIVE_SYSTEM_TEMPLATE.format(
         system=system,
         mechanical_truth_json=mechanical_truth_json,
         story_context_block=story_block,
     )
+
+    if world_tone_block:
+        # Prepend world context as the very first line so the model reads the
+        # genre identity before any constraint blocks.
+        return world_tone_block + "\n\n" + base
+
+    return base

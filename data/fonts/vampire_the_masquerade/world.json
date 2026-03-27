@@ -1,0 +1,10 @@
+{
+  "display_name":   "Vampire: The Masquerade",
+  "primary_color":  "#8B0000",
+  "default_font":   "",
+  "narrative_tone": "gothic horror political intrigue",
+  "description":    "You are dead, and the hunger will never let you forget it. The Masquerade is the ancient lie that keeps your kind hidden from mortal society — and from the hunters who would burn you if they knew. Kindred politics are a centuries-long chess game played by elders who remember Rome. Factions war in shadow: the Camarilla's iron order, the Anarchs' desperate freedom, the Sabbat's apocalyptic fury. Every feeding is a moral test. Every Discipline use risks the Beast seizing control. Narrate with velvet menace, aristocratic decadence, and the creeping horror of a monster that remembers being human.",
+  "system":         "vtm_v5",
+  "dice_notation":  "d10 dice pool",
+  "tags":           ["gothic", "horror", "political", "vampire", "urban fantasy"]
+}

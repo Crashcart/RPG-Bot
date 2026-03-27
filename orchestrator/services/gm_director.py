@@ -63,9 +63,12 @@ if TYPE_CHECKING:
     from orchestrator.services.claude_client         import ClaudeClient
     from orchestrator.services.gemini_client         import GeminiClient
     from orchestrator.services.node_router           import NodeRouter
+    from orchestrator.services.paradox_engine        import ParadoxEngine
+    from orchestrator.services.reality_wall          import RealityWall
     from orchestrator.services.story_memory          import StoryMemoryService
     from orchestrator.services.sub_agent_dispatcher  import SubAgentDispatcher
     from orchestrator.services.telemetry             import TelemetryService
+    from orchestrator.services.world_registry        import WorldRegistry
 
 import asyncio
 
@@ -128,6 +131,9 @@ class GMDirector:
         telemetry:      "TelemetryService | None" = None,
         claude:         "ClaudeClient | None" = None,
         cloud_provider: str = "gemini",
+        reality_wall:   "RealityWall | None" = None,
+        paradox_engine: "ParadoxEngine | None" = None,
+        world_registry: "WorldRegistry | None" = None,
     ) -> None:
         self._gemini         = gemini
         self._claude         = claude
@@ -136,6 +142,9 @@ class GMDirector:
         self._dispatcher     = dispatcher
         self._story_memory   = story_memory
         self._telemetry      = telemetry
+        self._reality_wall   = reality_wall
+        self._paradox_engine = paradox_engine
+        self._world_registry = world_registry
 
     # ── Public Interface ───────────────────────────────────────────────────────
 
@@ -246,9 +255,28 @@ class GMDirector:
         if self._telemetry:
             await self._telemetry.emit("synthesis_start", storyteller=storyteller_name)
 
+        # ── Inject dynamic world tone + capture driftnet channel ─────────────
+        synthesis_system  = GM_SYSTEM_PROMPT
+        driftnet_channel_id: str = ""
+        if self._world_registry:
+            try:
+                world_schema = await self._world_registry.get_campaign_schema(campaign_id)
+                if world_schema:
+                    if world_schema.gm_tone_block:
+                        synthesis_system = world_schema.gm_tone_block + "\n\n" + GM_SYSTEM_PROMPT
+                        if self._telemetry:
+                            await self._telemetry.emit(
+                                "world_tone_injected",
+                                world=world_schema.display_name,
+                                campaign_id=campaign_id,
+                            )
+                    driftnet_channel_id = world_schema.driftnet_channel_id or ""
+            except Exception as _wt_exc:
+                logger.debug("World tone injection failed (non-fatal): %s", _wt_exc)
+
         has_npc_tasks = any(r.task.task_type == "npc_dialogue" for r in sub_results)
         synthesis_coro = storyteller.generate(
-            system_prompt=GM_SYSTEM_PROMPT,
+            system_prompt=synthesis_system,
             user_prompt=synthesis_prompt,
             max_tokens=_SYNTHESIS_MAX_TOKENS,
         )
@@ -276,6 +304,21 @@ class GMDirector:
                 "storyteller=%s",
                 stripped_count, storyteller_name,
             )
+
+        # ── Step 4e: Paradox Engine (unreliable narrator injection) ───────────
+        if self._paradox_engine and self._reality_wall:
+            try:
+                paradox_level = await self._reality_wall.get_paradox_level(campaign_id)
+                if paradox_level > 1:
+                    final_narrative = self._paradox_engine.apply(final_narrative, paradox_level)
+                    if self._telemetry:
+                        await self._telemetry.emit(
+                            "paradox_applied",
+                            level=paradox_level,
+                            campaign_id=campaign_id,
+                        )
+            except Exception as px_exc:
+                logger.debug("Paradox Engine failed (non-fatal): %s", px_exc)
 
         # ── Persist New World Facts (best-effort) ──────────────────────────────
         try:
@@ -333,6 +376,7 @@ class GMDirector:
             ambient_audio_key=ambient_key,
             tts_cues=tts_cues,
             channel_directive=channel_directive,
+            driftnet_channel_id=driftnet_channel_id,
         )
 
     # ── Private: Whisper Generation ───────────────────────────────────────────

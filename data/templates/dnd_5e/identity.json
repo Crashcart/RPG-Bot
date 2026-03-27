@@ -1,0 +1,9 @@
+{
+  "display_name": "Dungeons & Dragons 5e",
+  "primary_color": "#C8A840",
+  "narrative_tone": "high fantasy heroic adventure",
+  "description": "Ancient evil stirs in the forgotten places of the world. Dragons hoard more than gold — they hoard secrets. Gods meddle. Prophecies mislead. Heroes are forged in the moments between easy choices and hard ones. Your tale is just beginning. Make it legendary.",
+  "system": "dnd_5e",
+  "dice_notation": "d20",
+  "tags": ["fantasy", "heroic", "adventure", "classic", "dungeon-crawl"]
+}

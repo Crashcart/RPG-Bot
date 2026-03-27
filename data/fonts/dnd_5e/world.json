@@ -1,0 +1,10 @@
+{
+  "display_name":   "Dungeons & Dragons 5e",
+  "primary_color":  "#C8A840",
+  "default_font":   "",
+  "narrative_tone": "high fantasy heroic adventure",
+  "description":    "A world of swords and sorcery, gods and monsters. Heroes rise from humble origins to reshape history. Magic is ancient and wondrous — a fireball shatters stone, a cleric's prayer mends bone. The world rewards courage. It does not forgive stupidity. Dragons are real, they are old, and they remember every slight. Narrate with the epic sweep of myth: dungeons dripping with menace, villains who believe they are right, moments of glory earned through genuine risk.",
+  "system":         "dnd_5e",
+  "dice_notation":  "d20",
+  "tags":           ["fantasy", "heroic", "classic", "dungeon-crawl"]
+}

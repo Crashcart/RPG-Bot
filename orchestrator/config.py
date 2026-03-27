@@ -67,9 +67,15 @@ class Settings(BaseSettings):
     # DuckDuckGo Instant Answers (no key required).
     serpapi_key: str = ""
 
-    # ── Disk Agency (AI file sandbox) ─────────────────────────────────────────
-    # Directory the GM AI can write world artifacts to (maps, session notes…)
-    world_data_dir: str = "/app/world_data"
+    # ── Aetheris Storage Paths (TDR §2) ──────────────────────────────────────
+    # Root data directory — shared volume mounted at /app/data
+    world_data_dir: str = "/app/data"
+    # SQLite vault (RealityWall scribe_core.db lives here)
+    vault_dir:      str = "/app/data/vault"
+    # Structured log output directory
+    logs_dir:       str = "/app/logs"
+    # GFS backup target (Janitor writes here)
+    backups_dir:    str = "/app/backups"
 
     # ── App ───────────────────────────────────────────────────────────────────
     log_level:          str = "INFO"

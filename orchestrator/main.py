@@ -73,7 +73,15 @@ from orchestrator.services import (
     TelemetryService,
     WebSearchService,
 )
-from orchestrator.services.pdf_processor import PDFProcessorService
+from orchestrator.services.janitor          import JanitorService
+from orchestrator.services.paradox_engine   import ParadoxEngine
+from orchestrator.services.prophetic_buffer import PropheticBuffer
+from orchestrator.services.reality_wall     import RealityWall
+from orchestrator.services.rolling_vault    import RollingVault
+from orchestrator.services.sic              import SystemIntegrityCheck
+from orchestrator.services.world_registry   import WorldRegistry
+from orchestrator.services.pdf_processor    import PDFProcessorService
+from orchestrator.schemas.world_schema      import WorldSchema, WorldSwitchRequest, WorldSwitchResponse
 
 # ─────────────────────────────────────────────────────────────────────────────
 settings = get_settings()
@@ -110,6 +118,39 @@ web_search = WebSearchService(settings)
 # ── Disk Agent Service ────────────────────────────────────────────────────────
 disk_agent = DiskAgentService(settings.world_data_dir)
 
+# ── Reality Wall (SQLite world-state + path isolation) ────────────────────────
+# TDR §2: vault DB at /app/data/vault/scribe_core.db
+reality_wall = RealityWall(data_dir=settings.world_data_dir, vault_dir=settings.vault_dir)
+
+# ── Paradox Engine (unreliable narrator post-processor) ───────────────────────
+paradox_engine = ParadoxEngine()
+
+# ── Prophetic Buffer (predictive asset pre-generation) ────────────────────────
+_cloud_storyteller = claude if (settings.cloud_provider == "claude" and claude) else gemini
+prophetic_buffer = PropheticBuffer(cache=cache, storyteller=_cloud_storyteller)
+
+# ── Janitor (GFS backup + media auto-prune) ───────────────────────────────────
+# Python JanitorService acts as secondary janitor; primary is the Alpine container
+janitor = JanitorService(
+    data_dir   = settings.world_data_dir,
+    backup_dir = settings.backups_dir,
+    logs_dir   = settings.logs_dir,
+)
+
+# ── World Registry (dynamic genre discovery + schema cache) ───────────────────
+world_registry = WorldRegistry(data_dir=settings.world_data_dir, reality_wall=reality_wall)
+
+# ── System Integrity Check (SIC) ──────────────────────────────────────────────
+# TDR §1: four-pillar verifier — runs on startup, on-demand, and post-backup.
+sic = SystemIntegrityCheck(
+    data_dir    = settings.world_data_dir,
+    backups_dir = settings.backups_dir,
+    ollama_host = settings.ollama_host,
+    cache       = cache,
+)
+# Give janitor a reference so it runs SIC after each backup cycle.
+janitor._sic = sic
+
 # ── Tier 1: GM Director (Central Storyteller) ─────────────────────────────────
 # Selects the storyteller per-turn (Gemini or auto-promoted Ollama), runs the
 # planning pass, dispatches sub-agents, synthesizes, and applies immersion filters.
@@ -121,10 +162,18 @@ gm_director = GMDirector(
     telemetry=telemetry_svc,
     claude=claude,
     cloud_provider=settings.cloud_provider,
+    reality_wall=reality_wall,
+    paradox_engine=paradox_engine,
+    world_registry=world_registry,
 )
 
+# ── Rolling Vault (sliding context window, anti-overflow) ─────────────────────
+# Step 5: pool is bound in lifespan after db.connect(); vault is injected into
+# IngestionPhase so every assemble() call gets bounded session history.
+rolling_vault = RollingVault(node_router=node_router)
+
 # Pipeline phase singletons
-ingestion    = IngestionPhase(db, rag)
+ingestion    = IngestionPhase(db, rag, rolling_vault=rolling_vault)
 adjudication = AdjudicationPhase(node_router)
 state_commit = StateCommitPhase(db, cache)
 narration    = NarrationPhase(gm_director)   # Phase 4 fully delegated to GMDirector
@@ -162,6 +211,23 @@ async def lifespan(app: FastAPI):
     await rag.connect()
     await story_memory.connect(db.pool)
     await node_router.start()   # begin background health-check loop
+    await reality_wall.init()        # create SQLite schema + data dirs
+    await world_registry.scan()      # discover all worlds in data/fonts/+templates/
+    rolling_vault.bind(db.pool)      # Step 5: bind pool now that db.connect() is done
+    await prophetic_buffer.start()
+    await janitor.start()
+
+    # ── System Integrity Check (TDR §1) ──────────────────────────────────────
+    # Inject cache reference now that cache is connected.
+    sic._cache = cache
+    sic_result = await sic.run()
+    if sic_result.status == "critical":
+        failed = [p for p in sic_result.pillars if not p.passed and p.critical]
+        msgs   = "; ".join(p.message for p in failed)
+        logger.critical(
+            "SIC CRITICAL — bot connection aborted. Failures: %s", msgs
+        )
+        raise RuntimeError(f"System Integrity Check failed: {msgs}")
 
     # Initialise async-session services now that db.pool is live
     global chronicle, campfire, downtime, retcon, backchannel, auth, sandbox
@@ -194,6 +260,8 @@ async def lifespan(app: FastAPI):
         await resolver_task
     except asyncio.CancelledError:
         pass
+    await prophetic_buffer.stop()
+    await janitor.stop()
     await node_router.stop()
     await db.disconnect()
     await cache.disconnect()
@@ -355,7 +423,17 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
         context = await ingestion.assemble(intent, campaign_id)
 
         # ── Phase 2: Mechanical Adjudication ──────────────────────────────────
+        # Signal Health Sentinel: heavy AI task in flight
+        _sentinel_key = "ironclad:sentinel:busy"
+        try:
+            await cache._redis.set(_sentinel_key, "adjudication", ex=60)
+        except Exception:
+            pass
         resolution = await adjudication.resolve(context)
+        try:
+            await cache._redis.delete(_sentinel_key)
+        except Exception:
+            pass
 
         # ── Phase 3: State Commitment ─────────────────────────────────────────
         commit = await state_commit.commit(resolution)
@@ -417,6 +495,32 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
             outcome=resolution.outcome.value,
             campaign_id=campaign_id,
         )
+
+        # ── Rolling Vault: append turn + compress if window full (Step 5) ───────
+        try:
+            asyncio.create_task(
+                rolling_vault.append(
+                    campaign_id  = campaign_id,
+                    player_input = intent.raw_input,
+                    gm_response  = narrative.narrative,
+                ),
+                name=f"vault-append-{intent.intent_id[:8]}",
+            )
+        except Exception as _rv_exc:
+            logger.debug("RollingVault.append task creation failed (non-fatal): %s", _rv_exc)
+
+        # ── Prophetic Buffer: fire-and-forget prefetch for next turn ──────────
+        try:
+            _pipeline_result = PipelineResult(
+                intent=intent,
+                resolution=resolution,
+                commit=commit,
+                narrative=narrative,
+                pipeline_duration_ms=duration_ms,
+            )
+            await prophetic_buffer.enqueue(_pipeline_result)
+        except Exception as _pb_exc:
+            logger.debug("PropheticBuffer enqueue failed (non-fatal): %s", _pb_exc)
 
         # ── Ghost Continuity: cache for offline Discord bot delivery ──────────
         # Key expires in 1 hour; bot marks delivered via /api/narrative/delivered
@@ -938,3 +1042,112 @@ async def telemetry_websocket(websocket: WebSocket):
 @app.get("/health", summary="Health check")
 async def health() -> dict:
     return {"status": "ok", "service": "ironclad-orchestrator"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# System Integrity Check (SIC) — TDR §1
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post(
+    "/api/sic/run",
+    summary="Manually trigger a full System Integrity Check",
+    tags=["sic"],
+)
+async def run_sic() -> dict:
+    """
+    Execute all four SIC pillars immediately.
+
+    Execution triggers: startup (automatic), Director command (this endpoint),
+    and Janitor post-backup (internal).  Results are cached in Redis and
+    surfaced on the Pulse dashboard.
+    """
+    result = await sic.run()
+    return result.to_dict()
+
+
+@app.get(
+    "/api/sic/status",
+    summary="Return the last cached SIC result from Redis",
+    tags=["sic"],
+)
+async def get_sic_status() -> dict:
+    """
+    Returns the most recent SIC result without re-running the checks.
+    If no result is cached yet, triggers a fresh run.
+    """
+    try:
+        raw = await cache.get("ironclad:sic:result")
+        if raw:
+            import json as _json
+            return _json.loads(raw)
+    except Exception:
+        pass
+    # No cached result — run now
+    result = await sic.run()
+    return result.to_dict()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dynamic World / Genre Orchestration
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get(
+    "/api/worlds",
+    summary="List all discovered RPG worlds",
+    response_model=list[WorldSchema],
+)
+async def list_worlds() -> list[WorldSchema]:
+    """
+    Return every world currently in the WorldRegistry cache.
+    Each world corresponds to a subdirectory of data/fonts/.
+    """
+    return world_registry.list_worlds()
+
+
+@app.post(
+    "/api/world/switch",
+    summary="Switch a campaign's active world (manifests new worlds automatically)",
+    response_model=WorldSwitchResponse,
+)
+async def switch_world(req: WorldSwitchRequest) -> WorldSwitchResponse:
+    """
+    Bind a campaign to a world.
+
+    - If the world folder exists in data/fonts/ it is activated immediately.
+    - If it does not exist, the folder + minimal world.json are created
+      on the fly (`manifested: true`) — no code changes required.
+
+    Called by the Discord `/switch_world` slash command.
+    """
+    try:
+        schema, manifested = await world_registry.switch_campaign_world(
+            campaign_id=req.campaign_id,
+            world_name=req.world_name,
+        )
+        return WorldSwitchResponse(
+            campaign_id=req.campaign_id,
+            world_name=req.world_name,
+            manifested=manifested,
+            schema=schema,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"World switch failed: {exc}",
+        )
+
+
+@app.get(
+    "/api/world/{campaign_id}",
+    summary="Get the active world schema for a campaign",
+    response_model=WorldSchema,
+)
+async def get_campaign_world(campaign_id: str) -> WorldSchema:
+    """Return the WorldSchema for the campaign's currently active world."""
+    schema = await world_registry.get_campaign_schema(campaign_id)
+    if schema is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No world set for campaign {campaign_id}.",
+        )
+    return schema
