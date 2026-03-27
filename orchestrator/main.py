@@ -77,6 +77,7 @@ from orchestrator.services.janitor          import JanitorService
 from orchestrator.services.paradox_engine   import ParadoxEngine
 from orchestrator.services.prophetic_buffer import PropheticBuffer
 from orchestrator.services.reality_wall     import RealityWall
+from orchestrator.services.sic              import SICResult, SystemIntegrityCheck
 from orchestrator.services.world_registry   import WorldRegistry
 from orchestrator.services.pdf_processor    import PDFProcessorService
 from orchestrator.schemas.world_schema      import WorldSchema, WorldSwitchRequest, WorldSwitchResponse
@@ -134,6 +135,17 @@ janitor = JanitorService(data_dir=settings.world_data_dir, backup_dir=settings.b
 # ── World Registry (dynamic genre discovery + schema cache) ───────────────────
 world_registry = WorldRegistry(data_dir=settings.world_data_dir, reality_wall=reality_wall)
 
+# ── System Integrity Check (SIC) ──────────────────────────────────────────────
+# TDR §1: four-pillar verifier — runs on startup, on-demand, and post-backup.
+sic = SystemIntegrityCheck(
+    data_dir    = settings.world_data_dir,
+    backups_dir = settings.backups_dir,
+    ollama_host = settings.ollama_host,
+    cache       = cache,
+)
+# Give janitor a reference so it runs SIC after each backup cycle.
+janitor._sic = sic
+
 # ── Tier 1: GM Director (Central Storyteller) ─────────────────────────────────
 # Selects the storyteller per-turn (Gemini or auto-promoted Ollama), runs the
 # planning pass, dispatches sub-agents, synthesizes, and applies immersion filters.
@@ -190,9 +202,21 @@ async def lifespan(app: FastAPI):
     await story_memory.connect(db.pool)
     await node_router.start()   # begin background health-check loop
     await reality_wall.init()        # create SQLite schema + data dirs
-    await world_registry.scan()      # discover all worlds in data/fonts/
+    await world_registry.scan()      # discover all worlds in data/fonts/+templates/
     await prophetic_buffer.start()
     await janitor.start()
+
+    # ── System Integrity Check (TDR §1) ──────────────────────────────────────
+    # Inject cache reference now that cache is connected.
+    sic._cache = cache
+    sic_result = await sic.run()
+    if sic_result.status == "critical":
+        failed = [p for p in sic_result.pillars if not p.passed and p.critical]
+        msgs   = "; ".join(p.message for p in failed)
+        logger.critical(
+            "SIC CRITICAL — bot connection aborted. Failures: %s", msgs
+        )
+        raise RuntimeError(f"System Integrity Check failed: {msgs}")
 
     # Initialise async-session services now that db.pool is live
     global chronicle, campfire, downtime, retcon, backchannel, auth, sandbox
@@ -994,6 +1018,49 @@ async def telemetry_websocket(websocket: WebSocket):
 @app.get("/health", summary="Health check")
 async def health() -> dict:
     return {"status": "ok", "service": "ironclad-orchestrator"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# System Integrity Check (SIC) — TDR §1
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post(
+    "/api/sic/run",
+    summary="Manually trigger a full System Integrity Check",
+    tags=["sic"],
+)
+async def run_sic() -> dict:
+    """
+    Execute all four SIC pillars immediately.
+
+    Execution triggers: startup (automatic), Director command (this endpoint),
+    and Janitor post-backup (internal).  Results are cached in Redis and
+    surfaced on the Pulse dashboard.
+    """
+    result = await sic.run()
+    return result.to_dict()
+
+
+@app.get(
+    "/api/sic/status",
+    summary="Return the last cached SIC result from Redis",
+    tags=["sic"],
+)
+async def get_sic_status() -> dict:
+    """
+    Returns the most recent SIC result without re-running the checks.
+    If no result is cached yet, triggers a fresh run.
+    """
+    try:
+        raw = await cache.get("ironclad:sic:result")
+        if raw:
+            import json as _json
+            return _json.loads(raw)
+    except Exception:
+        pass
+    # No cached result — run now
+    result = await sic.run()
+    return result.to_dict()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

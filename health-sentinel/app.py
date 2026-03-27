@@ -1,19 +1,18 @@
 """
-Health Sentinel — Ironclad GM Sidecar
-======================================
-Lightweight Flask service on port 58291 that exposes a single health
-endpoint reflecting whether the orchestrator is currently processing
-heavy AI or image tasks.
-
-The orchestrator sets the Redis key `ironclad:sentinel:busy` (with a
-short TTL) when it begins a heavy task and clears it on completion.
-This sidecar reads that key and returns the appropriate status.
+Health Sentinel — Ironclad GM Sidecar (Pulse)
+===============================================
+Lightweight Flask service on port 58291. Reports orchestrator busy/ok
+status and surfaces the last System Integrity Check (SIC) result from
+Redis to the Pulse dashboard.
 
 Endpoints
 ---------
 GET /health
-    200 {"status": "ok",   "uptime_s": <float>}
-    200 {"status": "busy", "uptime_s": <float>, "reason": <str>}
+    200 {"status": "ok"|"busy", "uptime_s": <float>}
+
+GET /sic
+    200 {"status": "healthy"|"unstable"|"critical", "checked_at": ..., "pillars": [...]}
+    200 {"status": "unknown"} if no SIC result is cached yet
 
 GET /ping
     200 "pong"
@@ -28,25 +27,28 @@ SENTINEL_PORT   Port to bind (default: 58291)
 
 from __future__ import annotations
 
+import json
 import os
 import time
 
 import redis
 from flask import Flask, jsonify
 
-app   = Flask(__name__)
+app    = Flask(__name__)
 _START = time.monotonic()
 
-_BUSY_KEY = "ironclad:sentinel:busy"
+_BUSY_KEY       = "ironclad:sentinel:busy"
+_SIC_RESULT_KEY = "ironclad:sic:result"
+
 
 def _redis() -> redis.Redis:
     return redis.Redis(
-        host     = os.environ.get("REDIS_HOST", "ironclad-cache"),
-        port     = int(os.environ.get("REDIS_PORT", 6379)),
-        password = os.environ.get("REDIS_PASSWORD", ""),
-        decode_responses=True,
-        socket_connect_timeout=2,
-        socket_timeout=2,
+        host              = os.environ.get("REDIS_HOST", "ironclad-cache"),
+        port              = int(os.environ.get("REDIS_PORT", 6379)),
+        password          = os.environ.get("REDIS_PASSWORD", ""),
+        decode_responses  = True,
+        socket_connect_timeout = 2,
+        socket_timeout    = 2,
     )
 
 
@@ -63,6 +65,22 @@ def health():
         return jsonify({"status": "ok", "uptime_s": uptime, "redis": "unreachable"}), 200
 
     return jsonify({"status": "ok", "uptime_s": uptime}), 200
+
+
+@app.get("/sic")
+def sic():
+    """Return the last SIC result written by the orchestrator to Redis."""
+    try:
+        r   = _redis()
+        raw = r.get(_SIC_RESULT_KEY)
+        if raw:
+            return jsonify(json.loads(raw)), 200
+    except redis.RedisError:
+        return jsonify({"status": "unknown", "error": "Redis unreachable"}), 200
+    except Exception as exc:
+        return jsonify({"status": "unknown", "error": str(exc)}), 200
+
+    return jsonify({"status": "unknown", "detail": "No SIC result cached yet."}), 200
 
 
 @app.get("/ping")

@@ -10,6 +10,8 @@ DATA_DIR="${DATA_DIR:-/app/data}"
 BACKUP_DIR="${BACKUP_DIR:-/app/backups}"
 LOG_DIR="${LOG_DIR:-/app/logs}"
 VAULT_DB="${DATA_DIR}/vault/scribe_core.db"
+# SIC endpoint on the Scribe (orchestrator) container — called post-backup
+SCRIBE_URL="${SCRIBE_URL:-http://scribe:8000}"
 
 GFS_DAILY_KEEP="${GFS_DAILY_KEEP:-7}"
 GFS_WEEKLY_KEEP="${GFS_WEEKLY_KEEP:-2}"
@@ -105,6 +107,13 @@ run_backup() {
         done
 
     log "BACKUP: GFS rotation complete."
+
+    # ── TDR §1: trigger SIC on the Scribe after every backup ──────────────────
+    if command -v wget >/dev/null 2>&1; then
+        wget -qO- --post-data="" "${SCRIBE_URL}/api/sic/run" >/dev/null 2>&1 \
+            && log "SIC: post-backup integrity check triggered." \
+            || log "SIC: could not reach Scribe for post-backup check (non-fatal)."
+    fi
 }
 
 # ── 30-Day Media Prune ────────────────────────────────────────────────────────

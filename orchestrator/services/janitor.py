@@ -59,6 +59,9 @@ class JanitorService:
         # TDR §2: backups at /app/backups (separate from data volume)
         self._backup_dir = Path(backup_dir) if backup_dir else (self._data_dir / "backups")
         self._tasks: list[asyncio.Task] = []
+        # Optional SIC reference — set by main.py after both services initialise.
+        # When set, a lightweight SIC run fires after every successful backup.
+        self._sic = None
 
     async def start(self) -> None:
         self._backup_dir.mkdir(parents=True, exist_ok=True)
@@ -80,19 +83,33 @@ class JanitorService:
             await asyncio.sleep(_BACKUP_INTERVAL)
             try:
                 await asyncio.get_running_loop().run_in_executor(None, self._run_backup)
+                logger.info("JanitorService: backup cycle complete.")
             except Exception as exc:
                 logger.error("JanitorService backup error: %s", exc)
+                continue
+            # TDR §1: run SIC post-backup (non-blocking; errors are logged, not raised)
+            if self._sic:
+                try:
+                    await self._sic.run()
+                except Exception as exc:
+                    logger.warning("JanitorService: post-backup SIC failed: %s", exc)
 
     def _run_backup(self) -> None:
-        now      = datetime.now(timezone.utc)
-        src      = self._data_dir / "reality_wall.db"
+        now = datetime.now(timezone.utc)
+        # TDR §2: source is vault/scribe_core.db (WAL mode, must flush WAL first)
+        src = self._data_dir / "vault" / "scribe_core.db"
         if not src.exists():
-            logger.debug("JanitorService: nothing to backup (reality_wall.db not found).")
+            logger.debug("JanitorService: nothing to backup (scribe_core.db not found).")
             return
 
-        stamp    = now.strftime("%Y%m%d_%H%M%S")
-        dst      = self._backup_dir / f"reality_wall_{stamp}.db"
+        stamp = now.strftime("%Y%m%d_%H%M%S")
+        dst   = self._backup_dir / f"scribe_core_{stamp}.db"
+        # Copy WAL companion files if present so the backup is self-contained
         shutil.copy2(src, dst)
+        for ext in ("-wal", "-shm"):
+            companion = src.parent / (src.name + ext)
+            if companion.exists():
+                shutil.copy2(companion, dst.parent / (dst.name + ext))
         logger.info("JanitorService: backup written → %s", dst.name)
 
         self._enforce_gfs(now)
@@ -100,7 +117,7 @@ class JanitorService:
     def _enforce_gfs(self, now: datetime) -> None:
         """Prune backups according to GFS retention policy."""
         backups = sorted(
-            self._backup_dir.glob("reality_wall_*.db"),
+            self._backup_dir.glob("scribe_core_*.db"),
             key=lambda p: p.stat().st_mtime,
             reverse=True,   # newest first
         )

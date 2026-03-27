@@ -1341,6 +1341,88 @@ async def slash_insight(interaction: discord.Interaction, target: str) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# System Integrity Check (SIC) — Admin Command
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SIC_STATUS_COLORS = {
+    "healthy":  0x00FF88,   # green
+    "unstable": 0xFFAA00,   # amber
+    "critical": 0xFF3333,   # red
+    "unknown":  0x888888,   # grey
+}
+_SIC_STATUS_ICONS = {
+    "healthy":  "🟢",
+    "unstable": "🟡",
+    "critical": "🔴",
+    "unknown":  "⚪",
+}
+
+
+@bot.tree.command(
+    name="sic",
+    description="[GM only] Run the System Integrity Check and show Aetheris environment health.",
+)
+async def slash_sic(interaction: discord.Interaction) -> None:
+    """
+    Triggers a live SIC run on the orchestrator and displays the four-pillar
+    result as a Discord embed.  Requires the GM/admin role.
+    """
+    await interaction.response.defer(ephemeral=True)
+
+    # Admin-role guard
+    if isinstance(interaction.user, discord.Member):
+        has_admin = any(r.name == _ADMIN_ROLE_NAME for r in interaction.user.roles)
+    else:
+        has_admin = False
+
+    if not has_admin:
+        await interaction.followup.send(
+            f"⚠️ Only members with the **{_ADMIN_ROLE_NAME}** role can use `/sic`.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        resp = await bot.http_client.post("/api/sic/run")
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.exception("SIC command failed: %s", exc)
+        await interaction.followup.send(
+            "⚠️ Could not reach the orchestrator for SIC. Check that Scribe is running.",
+            ephemeral=True,
+        )
+        return
+
+    status = data.get("status", "unknown")
+    icon   = _SIC_STATUS_ICONS.get(status, "⚪")
+    color  = _SIC_STATUS_COLORS.get(status, 0x888888)
+
+    embed = discord.Embed(
+        title=f"{icon} Aetheris Integrity Check — {status.upper()}",
+        description=f"Checked at: `{data.get('checked_at', 'unknown')}`",
+        color=color,
+    )
+
+    for pillar in data.get("pillars", []):
+        passed = pillar.get("passed", False)
+        name   = pillar.get("name", "unknown").replace("_", " ").title()
+        msg    = pillar.get("message", "")
+        detail = pillar.get("detail", "")
+        crit   = pillar.get("critical", False)
+
+        field_icon  = "✅" if passed else ("🔴" if crit else "🟡")
+        field_value = msg
+        if detail:
+            field_value += f"\n```{detail[:200]}```"
+
+        embed.add_field(name=f"{field_icon} {name}", value=field_value or "—", inline=False)
+
+    embed.set_footer(text="Run automatically on startup and post-backup. /sic for on-demand.")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
 # Dynamic Genre Orchestration — World Switch Commands
 # ─────────────────────────────────────────────────────────────────────────────
 
