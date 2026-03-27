@@ -29,6 +29,7 @@ Both duties are best-effort — failures are logged but never crash the service.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import logging
 import shutil
 from datetime import datetime, timedelta, timezone
@@ -44,6 +45,11 @@ _GFS_DAILY_KEEP    = 7
 _GFS_WEEKLY_KEEP   = 2
 _GFS_MONTHLY_KEEP  = 1
 
+# Log rotation (Step 7)
+_LOG_ZIP_AGE       = timedelta(days=7)    # zip .log files older than 7 days
+_LOG_DELETE_AGE    = timedelta(days=90)   # delete .gz/.log files older than 90 days
+_LOG_ROTATION_INTERVAL = 604_800          # weekly (seconds)
+
 _BACKUP_INTERVAL   = 86_400   # 24 h in seconds
 _PRUNE_INTERVAL    = 21_600   # 6 h in seconds
 
@@ -54,20 +60,28 @@ class JanitorService:
     two independent asyncio tasks — one for GFS backups, one for media pruning.
     """
 
-    def __init__(self, data_dir: str = "/app/data", backup_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        data_dir:   str = "/app/data",
+        backup_dir: str | None = None,
+        logs_dir:   str | None = None,
+    ) -> None:
         self._data_dir   = Path(data_dir)
         # TDR §2: backups at /app/backups (separate from data volume)
         self._backup_dir = Path(backup_dir) if backup_dir else (self._data_dir / "backups")
+        # TDR §2: logs at /app/logs
+        self._logs_dir   = Path(logs_dir)   if logs_dir   else Path("/app/logs")
         self._tasks: list[asyncio.Task] = []
         # Optional SIC reference — set by main.py after both services initialise.
-        # When set, a lightweight SIC run fires after every successful backup.
         self._sic = None
 
     async def start(self) -> None:
         self._backup_dir.mkdir(parents=True, exist_ok=True)
+        self._logs_dir.mkdir(parents=True, exist_ok=True)
         self._tasks = [
-            asyncio.create_task(self._backup_loop(),  name="janitor-backup"),
-            asyncio.create_task(self._prune_loop(),   name="janitor-prune"),
+            asyncio.create_task(self._backup_loop(),       name="janitor-backup"),
+            asyncio.create_task(self._prune_loop(),        name="janitor-prune"),
+            asyncio.create_task(self._log_rotation_loop(), name="janitor-log-rotation"),
         ]
         logger.info("JanitorService started (data_dir=%s).", self._data_dir)
 
@@ -195,13 +209,75 @@ class JanitorService:
         else:
             logger.debug("JanitorService auto-prune: no files older than 30 days found.")
 
+    # ── Log Rotation Loop (Step 7) ────────────────────────────────────────────
+
+    async def _log_rotation_loop(self) -> None:
+        while True:
+            await asyncio.sleep(_LOG_ROTATION_INTERVAL)
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, self._run_log_rotation
+                )
+            except Exception as exc:
+                logger.error("JanitorService log rotation error: %s", exc)
+
+    def _run_log_rotation(self) -> None:
+        """
+        Two-pass log rotation:
+          Pass 1 — Zip .log files older than 7 days.
+          Pass 2 — Delete .log.gz files (and any residual .log files) older than 90 days.
+        """
+        now            = datetime.now(timezone.utc)
+        zip_cutoff     = now - _LOG_ZIP_AGE
+        delete_cutoff  = now - _LOG_DELETE_AGE
+        zipped         = 0
+        deleted        = 0
+
+        if not self._logs_dir.exists():
+            return
+
+        for fp in sorted(self._logs_dir.rglob("*")):
+            if not fp.is_file():
+                continue
+
+            mtime = datetime.fromtimestamp(fp.stat().st_mtime, tz=timezone.utc)
+
+            # Pass 2: delete anything (gz or log) older than 90 days
+            if mtime < delete_cutoff and fp.suffix.lower() in (".log", ".gz"):
+                fp.unlink(missing_ok=True)
+                deleted += 1
+                logger.debug("JanitorService log-rotation: deleted %s", fp.name)
+                continue
+
+            # Pass 1: gzip plain .log files older than 7 days (not yet compressed)
+            if fp.suffix.lower() == ".log" and mtime < zip_cutoff:
+                gz_path = fp.with_suffix(".log.gz")
+                try:
+                    with fp.open("rb") as f_in, gzip.open(gz_path, "wb") as f_out:
+                        shutil.copyfileobj(f_in, f_out)
+                    fp.unlink(missing_ok=True)
+                    zipped += 1
+                    logger.debug("JanitorService log-rotation: zipped %s", fp.name)
+                except Exception as exc:
+                    logger.warning(
+                        "JanitorService log-rotation: could not zip %s: %s", fp.name, exc
+                    )
+
+        if zipped or deleted:
+            logger.info(
+                "JanitorService log-rotation: zipped %d, deleted %d file(s).",
+                zipped, deleted,
+            )
+        else:
+            logger.debug("JanitorService log-rotation: nothing to rotate.")
+
     # ── Manual Trigger (for admin endpoints / testing) ────────────────────────
 
     async def force_backup(self) -> str:
         """Trigger a GFS backup immediately. Returns the backup filename."""
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._run_backup)
-        backups = sorted(self._backup_dir.glob("reality_wall_*.db"))
+        backups = sorted(self._backup_dir.glob("scribe_core_*.db"))
         return backups[-1].name if backups else "no backup created"
 
     async def force_prune(self) -> int:

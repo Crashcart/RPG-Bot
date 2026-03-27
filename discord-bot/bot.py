@@ -232,6 +232,78 @@ async def _deliver_downtime_notifications(player_id: str) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Time Dilation — Per-Guild FIFO Action Queue (Step 6)
+# ─────────────────────────────────────────────────────────────────────────────
+# Discord requires a command acknowledgment within 3 seconds, but local GPU
+# inference can take 10-30 seconds.  Simultaneous actions from multiple players
+# would either time-out Discord or overwhelm the GPU.
+#
+# Solution:
+#   1. Every slash command / message action calls interaction.response.defer()
+#      or adds a ⏳ reaction immediately (< 100 ms).
+#   2. The actual pipeline work is placed onto a per-guild asyncio.Queue.
+#   3. A long-lived worker coroutine drains the queue one item at a time,
+#      so the GPU only ever handles one request per guild concurrently.
+#   4. Discord followup.send() works for up to 15 minutes after defer(),
+#      so players always receive their response even if they wait in queue.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MAX_QUEUE_DEPTH = 10   # per-guild backlog hard cap before rejecting new actions
+
+# guild_id → (Queue, worker Task)
+_guild_queues:  dict[str, asyncio.Queue] = {}
+_guild_workers: dict[str, asyncio.Task]  = {}
+
+
+async def _get_guild_queue(guild_id: str) -> asyncio.Queue:
+    """Return the FIFO queue for this guild, creating it and its worker if absent."""
+    worker = _guild_workers.get(guild_id)
+    if worker is None or worker.done():
+        q: asyncio.Queue = asyncio.Queue(maxsize=_MAX_QUEUE_DEPTH)
+        _guild_queues[guild_id]  = q
+        _guild_workers[guild_id] = asyncio.create_task(
+            _guild_worker(guild_id, q),
+            name=f"time-dilation-{guild_id}",
+        )
+    return _guild_queues[guild_id]
+
+
+async def _guild_worker(guild_id: str, queue: asyncio.Queue) -> None:
+    """
+    Serial consumer for one guild's action queue.
+
+    Each item is an async callable (zero-arg coroutine factory) that
+    encompasses a full pipeline dispatch + Discord delivery.  Items are
+    processed strictly in order so the GPU handles one request at a time.
+    """
+    logger.debug("Time Dilation: worker started for guild %s.", guild_id)
+    while True:
+        action_coro = await queue.get()
+        try:
+            await action_coro
+        except Exception as exc:
+            logger.error("Time Dilation worker [%s]: uncaught error: %s", guild_id, exc)
+        finally:
+            queue.task_done()
+
+
+async def _enqueue_action(guild_id: str, action_coro) -> bool:
+    """
+    Enqueue a pipeline action for the guild.
+
+    Returns True if queued successfully, False if the guild queue is full
+    (caller should inform the player that the GM is overwhelmed).
+    """
+    q = await _get_guild_queue(guild_id)
+    try:
+        q.put_nowait(action_coro)
+        return True
+    except asyncio.QueueFull:
+        logger.warning("Time Dilation: queue full for guild %s — action rejected.", guild_id)
+        return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Shared Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -732,27 +804,43 @@ async def on_message(message: discord.Message) -> None:
     if not raw_input:
         return
 
-    async with message.channel.typing():
-        try:
-            data = await _dispatch_intent(
-                player_id=str(message.author.id),
-                guild_id=str(message.guild.id) if message.guild else "DM",
-                channel_id=str(message.channel.id),
-                raw_input=raw_input,
-            )
-            await _deliver_narrative(
-                channel=message.channel,
-                data=data,
-                user=message.author,
-                guild=message.guild,
-            )
-        except httpx.HTTPStatusError as exc:
-            await message.channel.send(
-                f"⚠️ The GM engine returned an error: `{exc.response.status_code}`"
-            )
-        except Exception as exc:
-            logger.exception("Action dispatch failed: %s", exc)
-            await message.channel.send("⚠️ An internal error occurred. The GM is unavailable.")
+    guild_id = str(message.guild.id) if message.guild else "DM"
+
+    # Capture references for the closure
+    _channel = message.channel
+    _author  = message.author
+    _guild   = message.guild
+
+    async def _run_message_action() -> None:
+        async with _channel.typing():
+            try:
+                data = await _dispatch_intent(
+                    player_id=str(_author.id),
+                    guild_id=guild_id,
+                    channel_id=str(_channel.id),
+                    raw_input=raw_input,
+                )
+                await _deliver_narrative(channel=_channel, data=data, user=_author, guild=_guild)
+            except httpx.HTTPStatusError as exc:
+                await _channel.send(
+                    f"⚠️ The GM engine returned an error: `{exc.response.status_code}`"
+                )
+            except Exception as exc:
+                logger.exception("Action dispatch failed: %s", exc)
+                await _channel.send("⚠️ An internal error occurred. The GM is unavailable.")
+
+    # Check queue depth before enqueuing
+    existing_q = _guild_queues.get(guild_id)
+    queue_pos  = existing_q.qsize() if existing_q else 0
+
+    if not await _enqueue_action(guild_id, _run_message_action()):
+        await message.channel.send(
+            "⚠️ The GM's processing queue is full. Please wait a moment and try again."
+        )
+        return
+
+    if queue_pos > 0:
+        await message.add_reaction("⏳")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -769,32 +857,49 @@ async def slash_act(
     action: str,
     image: discord.Attachment | None = None,
 ) -> None:
+    # Acknowledge within 3 s — the queue may hold processing for 10-30 s
     await interaction.response.defer()
-    try:
-        raw_input = action
 
-        # Visual Intel: if an image is attached, get Gemini's description first
-        if image and image.content_type and image.content_type.startswith("image/"):
+    guild_id = str(interaction.guild_id or "DM")
+    existing_q = _guild_queues.get(guild_id)
+    if existing_q and existing_q.qsize() >= _MAX_QUEUE_DEPTH:
+        await interaction.followup.send(
+            "⚠️ The GM's processing queue is full. Please try again in a moment.",
+            ephemeral=True,
+        )
+        return
+
+    queue_pos = existing_q.qsize() if existing_q else 0
+
+    # Snapshot mutable args for the closure
+    _image = image
+    _action = action
+
+    async def _run_act() -> None:
+      try:
+        raw_input = _action
+
+        if _image and _image.content_type and _image.content_type.startswith("image/"):
             try:
                 vis_resp = await bot.http_client.post(
-                        f"{ORCHESTRATOR_URL}/api/vision/analyse",
-                        json={"image_url": image.url, "prompt": action},
-                        timeout=30,
-                    )
+                    f"{ORCHESTRATOR_URL}/api/vision/analyse",
+                    json={"image_url": _image.url, "prompt": _action},
+                    timeout=30,
+                )
                 if vis_resp.status_code == 200:
                     visual_desc = vis_resp.json().get("description", "")
                     if visual_desc:
-                        raw_input = f"[Visual context: {visual_desc}]\n\n{action}"
+                        raw_input = f"[Visual context: {visual_desc}]\n\n{_action}"
             except Exception as vis_exc:
                 logger.warning("Visual intel failed: %s", vis_exc)
 
         data = await _dispatch_intent(
             player_id=str(interaction.user.id),
-            guild_id=str(interaction.guild_id or "DM"),
+            guild_id=guild_id,
             channel_id=str(interaction.channel_id),
             raw_input=raw_input,
             command_type="slash_command",
-            slash_data={"command_name": "act", "options": {"action": action}},
+            slash_data={"command_name": "act", "options": {"action": _action}},
         )
         embed    = _build_action_embed(data, interaction.user)
         sent_msg = await interaction.followup.send(embed=embed, wait=True)
@@ -835,13 +940,26 @@ async def slash_act(
                 _mark_narrative_delivered(data["intent_id"], str(interaction.guild_id or "DM"))
             )
 
-    except httpx.HTTPStatusError as exc:
+      except httpx.HTTPStatusError as exc:
         await interaction.followup.send(
             f"⚠️ Engine error `{exc.response.status_code}`: {exc.response.text[:200]}"
         )
-    except Exception as exc:
+      except Exception as exc:
         logger.exception("Slash /act failed: %s", exc)
         await interaction.followup.send("⚠️ Internal error. Please try again.")
+
+    if not await _enqueue_action(guild_id, _run_act()):
+        await interaction.followup.send(
+            "⚠️ The GM's processing queue is full. Please try again in a moment.",
+            ephemeral=True,
+        )
+        return
+
+    if queue_pos > 0:
+        await interaction.followup.send(
+            f"⏳ Your action is queued (position {queue_pos + 1}). The GM will respond shortly…",
+            ephemeral=True,
+        )
 
 
 @bot.tree.command(name="status", description="Check your character's current stats.")

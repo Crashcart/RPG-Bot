@@ -9,6 +9,9 @@ set -eu
 DATA_DIR="${DATA_DIR:-/app/data}"
 BACKUP_DIR="${BACKUP_DIR:-/app/backups}"
 LOG_DIR="${LOG_DIR:-/app/logs}"
+LOG_ZIP_AGE_DAYS="${LOG_ZIP_AGE_DAYS:-7}"       # zip .log files older than N days
+LOG_DELETE_AGE_DAYS="${LOG_DELETE_AGE_DAYS:-90}" # delete .gz/.log files older than N days
+LOG_ROTATION_INTERVAL_HOURS="${LOG_ROTATION_INTERVAL_HOURS:-168}"  # weekly = 168 h
 VAULT_DB="${DATA_DIR}/vault/scribe_core.db"
 # SIC endpoint on the Scribe (orchestrator) container — called post-backup
 SCRIBE_URL="${SCRIBE_URL:-http://scribe:8000}"
@@ -22,6 +25,7 @@ PRUNE_INTERVAL_HOURS="${PRUNE_INTERVAL_HOURS:-6}"
 
 BACKUP_INTERVAL_SECS=$(( BACKUP_INTERVAL_HOURS * 3600 ))
 PRUNE_INTERVAL_SECS=$(( PRUNE_INTERVAL_HOURS * 3600 ))
+LOG_ROTATION_INTERVAL_SECS=$(( LOG_ROTATION_INTERVAL_HOURS * 3600 ))
 
 LOG_FILE="${LOG_DIR}/janitor.log"
 
@@ -133,9 +137,42 @@ run_prune() {
     log "PRUNE: complete."
 }
 
+# ── Log Rotation (Step 7) ─────────────────────────────────────────────────────
+run_log_rotation() {
+    [ -d "$LOG_DIR" ] || { log "LOG_ROTATION: $LOG_DIR not found — skipping."; return; }
+
+    ZIPPED=0
+    DELETED=0
+
+    # Pass 1: gzip .log files older than LOG_ZIP_AGE_DAYS
+    find "$LOG_DIR" -maxdepth 2 -name "*.log" -mtime "+${LOG_ZIP_AGE_DAYS}" \
+        | while IFS= read -r f; do
+            gz="${f}.gz"
+            if gzip -c "$f" > "$gz" 2>/dev/null; then
+                rm -f "$f"
+                log "LOG_ROTATION: zipped $(basename "$f")"
+                ZIPPED=$(( ZIPPED + 1 ))
+            else
+                log "LOG_ROTATION: failed to zip $f — skipping."
+            fi
+        done
+
+    # Pass 2: delete .gz and residual .log files older than LOG_DELETE_AGE_DAYS
+    find "$LOG_DIR" -maxdepth 2 \( -name "*.log" -o -name "*.log.gz" \) \
+        -mtime "+${LOG_DELETE_AGE_DAYS}" \
+        | while IFS= read -r f; do
+            rm -f "$f"
+            log "LOG_ROTATION: deleted $(basename "$f")"
+            DELETED=$(( DELETED + 1 ))
+        done
+
+    log "LOG_ROTATION: complete."
+}
+
 # ── Main Loop ─────────────────────────────────────────────────────────────────
 LAST_BACKUP=0
 LAST_PRUNE=0
+LAST_LOG_ROTATION=0
 
 while true; do
     NOW=$(date +%s)
@@ -148,6 +185,11 @@ while true; do
     if [ $(( NOW - LAST_PRUNE )) -ge "$PRUNE_INTERVAL_SECS" ]; then
         run_prune
         LAST_PRUNE=$NOW
+    fi
+
+    if [ $(( NOW - LAST_LOG_ROTATION )) -ge "$LOG_ROTATION_INTERVAL_SECS" ]; then
+        run_log_rotation
+        LAST_LOG_ROTATION=$NOW
     fi
 
     sleep 300   # check every 5 minutes; actual work fires on interval

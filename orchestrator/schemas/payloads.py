@@ -146,7 +146,8 @@ class VehicleSnapshot(BaseModel):
 class ContextAssemblyPayload(BaseModel):
     """
     Phase 1 output – fed into the Ollama mechanical engine.
-    Contains intent, full character state, and retrieved rulebook context.
+    Contains intent, full character state, retrieved rulebook context, and
+    the Rolling Vault history block for long-session continuity.
     """
     intent_id:          str
     character:          CharacterSnapshot
@@ -157,6 +158,16 @@ class ContextAssemblyPayload(BaseModel):
     )
     rule_chunks:        list[RuleChunk]      = Field(default_factory=list)
     raw_input:          str
+    # Rolling Vault: formatted history string injected before the prompt.
+    # Empty on the very first turn of a campaign.
+    rolling_context:    str = Field(
+        default="",
+        description=(
+            "Bounded session history from the Rolling Vault — summaries of older "
+            "turns plus verbatim recent turns. Prepended to every Ollama prompt to "
+            "prevent context-window overflow."
+        ),
+    )
     assembled_at:       datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

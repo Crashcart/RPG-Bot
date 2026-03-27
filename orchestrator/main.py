@@ -77,6 +77,7 @@ from orchestrator.services.janitor          import JanitorService
 from orchestrator.services.paradox_engine   import ParadoxEngine
 from orchestrator.services.prophetic_buffer import PropheticBuffer
 from orchestrator.services.reality_wall     import RealityWall
+from orchestrator.services.rolling_vault    import RollingVault
 from orchestrator.services.sic              import SICResult, SystemIntegrityCheck
 from orchestrator.services.world_registry   import WorldRegistry
 from orchestrator.services.pdf_processor    import PDFProcessorService
@@ -130,7 +131,11 @@ prophetic_buffer = PropheticBuffer(cache=cache, storyteller=_cloud_storyteller)
 
 # ── Janitor (GFS backup + media auto-prune) ───────────────────────────────────
 # Python JanitorService acts as secondary janitor; primary is the Alpine container
-janitor = JanitorService(data_dir=settings.world_data_dir, backup_dir=settings.backups_dir)
+janitor = JanitorService(
+    data_dir   = settings.world_data_dir,
+    backup_dir = settings.backups_dir,
+    logs_dir   = settings.logs_dir,
+)
 
 # ── World Registry (dynamic genre discovery + schema cache) ───────────────────
 world_registry = WorldRegistry(data_dir=settings.world_data_dir, reality_wall=reality_wall)
@@ -162,8 +167,13 @@ gm_director = GMDirector(
     world_registry=world_registry,
 )
 
+# ── Rolling Vault (sliding context window, anti-overflow) ─────────────────────
+# Step 5: pool is bound in lifespan after db.connect(); vault is injected into
+# IngestionPhase so every assemble() call gets bounded session history.
+rolling_vault = RollingVault(node_router=node_router)
+
 # Pipeline phase singletons
-ingestion    = IngestionPhase(db, rag)
+ingestion    = IngestionPhase(db, rag, rolling_vault=rolling_vault)
 adjudication = AdjudicationPhase(node_router)
 state_commit = StateCommitPhase(db, cache)
 narration    = NarrationPhase(gm_director)   # Phase 4 fully delegated to GMDirector
@@ -203,6 +213,7 @@ async def lifespan(app: FastAPI):
     await node_router.start()   # begin background health-check loop
     await reality_wall.init()        # create SQLite schema + data dirs
     await world_registry.scan()      # discover all worlds in data/fonts/+templates/
+    rolling_vault.bind(db.pool)      # Step 5: bind pool now that db.connect() is done
     await prophetic_buffer.start()
     await janitor.start()
 
@@ -484,6 +495,19 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
             outcome=resolution.outcome.value,
             campaign_id=campaign_id,
         )
+
+        # ── Rolling Vault: append turn + compress if window full (Step 5) ───────
+        try:
+            asyncio.create_task(
+                rolling_vault.append(
+                    campaign_id  = campaign_id,
+                    player_input = intent.raw_input,
+                    gm_response  = narrative.narrative,
+                ),
+                name=f"vault-append-{intent.intent_id[:8]}",
+            )
+        except Exception as _rv_exc:
+            logger.debug("RollingVault.append task creation failed (non-fatal): %s", _rv_exc)
 
         # ── Prophetic Buffer: fire-and-forget prefetch for next turn ──────────
         try:
