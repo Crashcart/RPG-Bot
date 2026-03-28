@@ -1088,6 +1088,27 @@ async def get_sic_status() -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Settings API (consumed by the Discord bot)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get(
+    "/api/settings/channels",
+    summary="Return the generic channel map for the Discord bot",
+    tags=["settings"],
+)
+async def api_settings_channels() -> dict:
+    """
+    Returns the channel_map system setting as a plain JSON object.
+    Keys are admin-defined zone labels (e.g. "med_bay", "brig");
+    values are Discord channel ID strings.
+
+    Called by the Discord bot every ~60 s to refresh its channel lookup
+    table without requiring an env-var edit or container restart.
+    """
+    return await db.get_system_setting("channel_map", default={})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Dynamic World / Genre Orchestration
 # ─────────────────────────────────────────────────────────────────────────────
 

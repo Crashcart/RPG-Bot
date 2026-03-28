@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 import uuid
 from typing import Any
 
@@ -46,13 +47,34 @@ ORCHESTRATOR_URL  = os.environ["ORCHESTRATOR_URL"]
 DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 _MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024
 
-# ── Channel Key → Discord Channel ID mapping (configured via env vars) ────────
-_CHANNEL_IDS: dict[str, int | None] = {
-    "dungeon":  int(os.environ["DUNGEON_CHANNEL_ID"])  if os.environ.get("DUNGEON_CHANNEL_ID")  else None,
-    "prison":   int(os.environ["PRISON_CHANNEL_ID"])   if os.environ.get("PRISON_CHANNEL_ID")   else None,
-    "hospital": int(os.environ["HOSPITAL_CHANNEL_ID"]) if os.environ.get("HOSPITAL_CHANNEL_ID") else None,
-    "main":     int(os.environ["MAIN_CHANNEL_ID"])     if os.environ.get("MAIN_CHANNEL_ID")     else None,
-}
+# ── Channel Map — generic zone-key → Discord channel ID ──────────────────────
+# Populated at runtime from the orchestrator's /api/settings/channels endpoint.
+# Admins configure zone names (e.g. "med_bay", "brig") via White Portal → Settings.
+# The cache is refreshed every _CHANNEL_MAP_TTL seconds so changes propagate
+# without a bot restart.
+
+_channel_map_cache:      dict[str, int] = {}
+_channel_map_fetched_at: float          = 0.0
+_CHANNEL_MAP_TTL: float                 = 60.0  # seconds between refreshes
+
+
+async def _get_channel_id(channel_key: str) -> int | None:
+    """Return the Discord channel ID for a zone key, refreshing the cache as needed."""
+    global _channel_map_cache, _channel_map_fetched_at
+    now = time.monotonic()
+    if now - _channel_map_fetched_at > _CHANNEL_MAP_TTL:
+        try:
+            resp = await bot.http_client.get("/api/settings/channels")
+            if resp.status_code == 200:
+                raw = resp.json()
+                _channel_map_cache = {
+                    k: int(v) for k, v in raw.items()
+                    if str(v).isdigit()
+                }
+                _channel_map_fetched_at = now
+        except Exception as exc:
+            logger.debug("Channel map refresh failed: %s", exc)
+    return _channel_map_cache.get(channel_key)
 
 # ── Outcome → embed colour ────────────────────────────────────────────────────
 OUTCOME_COLORS: dict[str, int] = {
@@ -569,10 +591,12 @@ async def _handle_channel_directive(
     """
     Grant or revoke the player's access to a semantic location channel.
 
-    "move_to"  → grant read-only access to dungeon/prison/hospital channel.
-    "restore"  → restore full send access to the main channel.
+    "move_to"  → grant read-only access to the target zone channel.
+    "restore"  → restore full send access to the main/home channel.
 
-    Channel IDs are mapped from env vars.  If a key is not configured,
+    Channel IDs are fetched from the orchestrator settings API (cached 60 s).
+    Configure zone names in White Portal → Settings → Channel Map.
+    If a key is not configured,
     the directive is logged and skipped — no crash, no noise.
     Requires bot 'Manage Permissions' permission in the target channel.
     """
@@ -580,7 +604,7 @@ async def _handle_channel_directive(
     channel_key = directive.get("channel_key")
     reason_str  = directive.get("reason", "GM narrative directive")
 
-    target_id = _CHANNEL_IDS.get(channel_key)
+    target_id = await _get_channel_id(channel_key)
     if not target_id:
         logger.info(
             "Channel directive '%s' → '%s' skipped — env var not configured.",
