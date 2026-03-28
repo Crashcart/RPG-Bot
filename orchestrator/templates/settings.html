@@ -1,0 +1,216 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+
+{% block content %}
+<style>
+  .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 720px) { .settings-grid { grid-template-columns: 1fr; } }
+  .key-cell { font-family: 'Courier New', monospace; font-size: 12px; color: var(--gold); }
+  .id-cell  { font-family: 'Courier New', monospace; font-size: 12px; color: var(--text); }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+  input[type="number"] {
+    width: 100%; background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); padding: 8px 12px; border-radius: var(--radius);
+    font-size: 13px; font-family: inherit; outline: none; transition: border-color 0.15s;
+  }
+  input[type="number"]:focus { border-color: var(--gold); }
+  input[type="password"] {
+    width: 100%; background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); padding: 8px 12px; border-radius: var(--radius);
+    font-size: 13px; font-family: inherit; outline: none; transition: border-color 0.15s;
+  }
+  input[type="password"]:focus { border-color: var(--gold); }
+  .api-key-row { display: flex; gap: 8px; align-items: center; }
+  .api-key-row input { flex: 1; }
+  .configured-badge {
+    font-size: 10px; font-weight: 600; padding: 3px 8px; border-radius: 20px; white-space: nowrap;
+    background: rgba(76,175,120,0.12); color: var(--green); border: 1px solid rgba(76,175,120,0.2);
+  }
+  .not-set-badge {
+    font-size: 10px; font-weight: 600; padding: 3px 8px; border-radius: 20px; white-space: nowrap;
+    background: rgba(107,107,128,0.10); color: var(--muted); border: 1px solid var(--border);
+  }
+  .restart-note {
+    display: flex; align-items: center; gap: 8px;
+    background: rgba(201,168,76,0.06); border: 1px solid rgba(201,168,76,0.18);
+    border-radius: var(--radius); padding: 10px 14px;
+    font-size: 12px; color: var(--gold); margin-top: 16px;
+  }
+</style>
+
+<div class="page-header">
+  <h1>⚙ Settings</h1>
+  <p>Runtime configuration — changes take effect immediately unless marked otherwise.</p>
+</div>
+
+<div class="settings-grid">
+
+  {# ── Card 1: General ──────────────────────────────────────────────────────── #}
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">General</span>
+    </div>
+    <div class="card-body">
+      <form method="post" action="/web/settings/general">
+        <div class="form-row">
+          <label for="admin_role_name">Admin Role Name</label>
+          <input type="text" id="admin_role_name" name="admin_role_name"
+                 value="{{ admin_role_name }}" placeholder="GM" required>
+          <p class="hint">Discord role whose members can use <code>/retcon</code>, <code>/sic</code>, and <code>/switch_world</code>.</p>
+        </div>
+        <div class="form-row">
+          <label for="session_ttl">Session TTL (seconds)</label>
+          <input type="number" id="session_ttl" name="session_ttl"
+                 value="{{ session_ttl }}" min="60" step="60">
+          <p class="hint">How long a player session stays active without a new action.</p>
+        </div>
+        <div class="form-row">
+          <label for="cloud_provider">Cloud Storyteller</label>
+          <select id="cloud_provider" name="cloud_provider">
+            <option value="gemini" {% if cloud_provider == "gemini" %}selected{% endif %}>Gemini (Google)</option>
+            <option value="claude" {% if cloud_provider == "claude" %}selected{% endif %}>Claude (Anthropic)</option>
+          </select>
+          <p class="hint">Which cloud API handles Phase 4 narrative prose. Toggle the raw on/off switch on the <a href="/web/nodes" style="color:var(--gold)">Nodes</a> page.</p>
+        </div>
+
+        <div class="divider-label">AI Models</div>
+
+        <div class="form-row">
+          <label for="gemini_model">Gemini Model</label>
+          <input type="text" id="gemini_model" name="gemini_model"
+                 value="{{ gemini_model }}" placeholder="gemini-1.5-pro">
+        </div>
+        <div class="form-row">
+          <label for="ollama_model">Ollama Model</label>
+          <input type="text" id="ollama_model" name="ollama_model"
+                 value="{{ ollama_model }}" placeholder="mistral:7b-instruct">
+          <p class="hint">Default model for local adjudication nodes. Individual nodes can override this on the <a href="/web/nodes" style="color:var(--gold)">Nodes</a> page.</p>
+        </div>
+        <div class="form-row">
+          <label for="claude_model">Claude Model</label>
+          <input type="text" id="claude_model" name="claude_model"
+                 value="{{ claude_model }}" placeholder="claude-sonnet-4-6">
+        </div>
+
+        <div class="divider-label">API Keys</div>
+
+        <div class="form-row">
+          <label>Gemini API Key</label>
+          <div class="api-key-row">
+            <input type="password" name="gemini_api_key" placeholder="Leave blank to keep existing" autocomplete="new-password">
+            {% if gemini_api_key_set %}
+              <span class="configured-badge">● Configured</span>
+            {% else %}
+              <span class="not-set-badge">Not set</span>
+            {% endif %}
+          </div>
+        </div>
+        <div class="form-row">
+          <label>Claude API Key</label>
+          <div class="api-key-row">
+            <input type="password" name="claude_api_key" placeholder="Leave blank to keep existing" autocomplete="new-password">
+            {% if claude_api_key_set %}
+              <span class="configured-badge">● Configured</span>
+            {% else %}
+              <span class="not-set-badge">Not set</span>
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="restart-note">
+          ⚠ API key changes are stored immediately but require a service restart to be loaded by the inference clients.
+        </div>
+
+        <div style="margin-top:20px">
+          <button type="submit" class="btn btn-gold">Save Settings</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  {# ── Card 2: Channel Map ─────────────────────────────────────────────────── #}
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">Channel Map</span>
+    </div>
+    <div class="card-body">
+      <p class="hint" style="margin-bottom:16px">
+        Map zone names to Discord channel IDs. Use any labels that fit your game system —
+        <code>med_bay</code>, <code>brig</code>, <code>tavern</code>, <code>dungeon</code>, etc.
+        The GM engine references these by key when directing players to a location.
+        Changes propagate to the bot within 60 seconds.
+      </p>
+
+      {% if channel_map %}
+      <div class="table-wrap" style="margin-bottom:20px">
+        <table>
+          <thead>
+            <tr>
+              <th>Zone Key</th>
+              <th>Channel ID</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for key, cid in channel_map.items() %}
+            <tr>
+              <td class="key-cell">{{ key }}</td>
+              <td class="id-cell">{{ cid }}</td>
+              <td style="text-align:right">
+                <form method="post" action="/web/settings/channels/delete" style="display:inline">
+                  <input type="hidden" name="channel_key" value="{{ key }}">
+                  <button type="submit" class="btn btn-danger btn-sm"
+                          onclick="return confirm('Remove channel \'{{ key }}\'?')">✕</button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty" style="padding:28px 16px">
+        <div class="empty-icon">📡</div>
+        <p>No channels configured yet. Add one below.</p>
+      </div>
+      {% endif %}
+
+      <div class="divider-label">Add / Update Entry</div>
+
+      <form method="post" action="/web/settings/channels/add">
+        <div class="row" style="align-items:flex-end;gap:8px">
+          <div class="form-row" style="flex:1;margin-bottom:0">
+            <label for="channel_key">Zone Key</label>
+            <input type="text" id="channel_key" name="channel_key"
+                   placeholder="e.g. med_bay" pattern="[a-z0-9_]{1,32}"
+                   title="Lowercase letters, digits and underscores only" required>
+          </div>
+          <div class="form-row" style="flex:1;margin-bottom:0">
+            <label for="channel_id">Discord Channel ID</label>
+            <input type="text" id="channel_id" name="channel_id"
+                   placeholder="e.g. 1234567890123456789"
+                   pattern="\d+" title="Numeric channel snowflake" required>
+          </div>
+          <div style="padding-bottom:0">
+            <button type="submit" class="btn btn-gold">Add</button>
+          </div>
+        </div>
+        <p class="hint" style="margin-top:8px">
+          Right-click any Discord channel → <em>Copy Channel ID</em> (enable Developer Mode in Discord settings first).
+        </p>
+      </form>
+
+      <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border)">
+        <p class="hint">
+          <strong style="color:var(--text)">Startup-only settings</strong> — the following require
+          editing <code>.env</code> and restarting the stack:
+          <code>DISCORD_BOT_TOKEN</code>, <code>POSTGRES_PASSWORD</code>,
+          <code>REDIS_PASSWORD</code>, <code>LAVALINK_PASSWORD</code>,
+          <code>SESSION_SECRET_KEY</code>.
+        </p>
+      </div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}

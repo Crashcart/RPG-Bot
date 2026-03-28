@@ -21,6 +21,10 @@ Pages:
   GET  /web/backchannel            – White Portal Admin Backchannel
   POST /web/backchannel/send       – Submit a new OOC directive
   POST /web/backchannel/cancel/{id} – Cancel a pending directive
+  GET  /web/settings               – Runtime settings (channel map, AI models, API keys)
+  POST /web/settings/general       – Save general + AI settings
+  POST /web/settings/channels/add  – Add or update a channel map entry
+  POST /web/settings/channels/delete – Remove a channel map entry
 """
 
 from __future__ import annotations
@@ -30,6 +34,8 @@ import logging
 import os
 import uuid
 from pathlib import Path
+
+import re
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -473,3 +479,117 @@ async def sandbox_page(request: Request):
         "flash_ok":  request.session.pop("flash_ok",  ""),
         "flash_err": request.session.pop("flash_err", ""),
     })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Settings Page
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CHANNEL_KEY_RE = re.compile(r'^[a-z0-9_]{1,32}$')
+
+
+@router.get("/settings", response_class=HTMLResponse)
+async def settings_page(request: Request):
+    db = _db(request)
+    channel_map     = await db.get_system_setting("channel_map",         default={})
+    admin_role_name = await db.get_system_setting("admin_role_name",     default="GM")
+    session_ttl     = await db.get_system_setting("session_ttl_seconds", default=3600)
+    gemini_model    = await db.get_system_setting("gemini_model",        default="gemini-1.5-pro")
+    ollama_model    = await db.get_system_setting("ollama_model",        default="mistral:7b-instruct")
+    claude_model    = await db.get_system_setting("claude_model",        default="claude-sonnet-4-6")
+    cloud_provider  = await db.get_system_setting("cloud_provider",      default="gemini")
+    gemini_api_key  = await db.get_system_setting("gemini_api_key",      default="")
+    claude_api_key  = await db.get_system_setting("claude_api_key",      default="")
+    return _tmpl(request).TemplateResponse("settings.html", {
+        "request":          request,
+        "page":             "settings",
+        "channel_map":      channel_map or {},
+        "admin_role_name":  admin_role_name or "GM",
+        "session_ttl":      session_ttl or 3600,
+        "gemini_model":     gemini_model or "gemini-1.5-pro",
+        "ollama_model":     ollama_model or "mistral:7b-instruct",
+        "claude_model":     claude_model or "claude-sonnet-4-6",
+        "cloud_provider":   cloud_provider or "gemini",
+        "gemini_api_key_set": bool(gemini_api_key),
+        "claude_api_key_set": bool(claude_api_key),
+        "flash_ok":  request.session.pop("flash_ok",  ""),
+        "flash_err": request.session.pop("flash_err", ""),
+    })
+
+
+@router.post("/settings/general", response_class=RedirectResponse)
+async def settings_general_save(
+    request:         Request,
+    admin_role_name: str = Form("GM"),
+    session_ttl:     int = Form(3600),
+    gemini_model:    str = Form("gemini-1.5-pro"),
+    ollama_model:    str = Form("mistral:7b-instruct"),
+    claude_model:    str = Form("claude-sonnet-4-6"),
+    cloud_provider:  str = Form("gemini"),
+    gemini_api_key:  str = Form(""),
+    claude_api_key:  str = Form(""),
+):
+    db = _db(request)
+    try:
+        await db.set_system_setting("admin_role_name",     admin_role_name.strip() or "GM")
+        await db.set_system_setting("session_ttl_seconds", max(60, session_ttl))
+        await db.set_system_setting("gemini_model",        gemini_model.strip() or "gemini-1.5-pro")
+        await db.set_system_setting("ollama_model",        ollama_model.strip() or "mistral:7b-instruct")
+        await db.set_system_setting("claude_model",        claude_model.strip() or "claude-sonnet-4-6")
+        if cloud_provider in ("gemini", "claude"):
+            await db.set_system_setting("cloud_provider", cloud_provider)
+        # Only update API keys if the field is non-empty (blank = keep existing)
+        if gemini_api_key.strip():
+            await db.set_system_setting("gemini_api_key", gemini_api_key.strip())
+        if claude_api_key.strip():
+            await db.set_system_setting("claude_api_key", claude_api_key.strip())
+        request.session["flash_ok"] = "Settings saved. API key changes take effect after restart."
+    except Exception as exc:
+        logger.exception("Settings save failed: %s", exc)
+        request.session["flash_err"] = str(exc)
+    return RedirectResponse("/web/settings", status_code=303)
+
+
+@router.post("/settings/channels/add", response_class=RedirectResponse)
+async def settings_channels_add(
+    request:     Request,
+    channel_key: str = Form(...),
+    channel_id:  str = Form(...),
+):
+    db = _db(request)
+    key = channel_key.strip().lower()
+    cid = channel_id.strip()
+    if not _CHANNEL_KEY_RE.match(key):
+        request.session["flash_err"] = (
+            "Channel key must be 1–32 lowercase letters, digits, or underscores."
+        )
+        return RedirectResponse("/web/settings", status_code=303)
+    if not cid.isdigit():
+        request.session["flash_err"] = "Channel ID must be a numeric Discord snowflake."
+        return RedirectResponse("/web/settings", status_code=303)
+    try:
+        channel_map = await db.get_system_setting("channel_map", default={}) or {}
+        channel_map[key] = cid
+        await db.set_system_setting("channel_map", channel_map)
+        request.session["flash_ok"] = f"Channel '{key}' → {cid} saved. Takes effect within 60 s."
+    except Exception as exc:
+        logger.exception("Channel map add failed: %s", exc)
+        request.session["flash_err"] = str(exc)
+    return RedirectResponse("/web/settings", status_code=303)
+
+
+@router.post("/settings/channels/delete", response_class=RedirectResponse)
+async def settings_channels_delete(
+    request:     Request,
+    channel_key: str = Form(...),
+):
+    db = _db(request)
+    try:
+        channel_map = await db.get_system_setting("channel_map", default={}) or {}
+        channel_map.pop(channel_key.strip(), None)
+        await db.set_system_setting("channel_map", channel_map)
+        request.session["flash_ok"] = f"Channel '{channel_key}' removed."
+    except Exception as exc:
+        logger.exception("Channel map delete failed: %s", exc)
+        request.session["flash_err"] = str(exc)
+    return RedirectResponse("/web/settings", status_code=303)
