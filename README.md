@@ -146,7 +146,12 @@ RPG-Bot/
 │       ├── 003_vehicles_and_nodes.sql      # Vehicles, subsystems, node_registry
 │       ├── 004_node_roles_and_settings.sql # Role tags, global_settings
 │       ├── 005_node_latency.sql            # TTFT benchmarking columns
-│       └── 006_node_voice_profile.sql      # Per-node voice_id for TTS
+│       ├── 006_node_voice_profile.sql      # Per-node voice_id for TTS
+│       ├── 007_async_session_features.sql  # downtime_tasks, player_presence, retcon_log
+│       ├── 008_admin_backchannel.sql       # gm_directives, fair_play_mode seed
+│       ├── 009_admin_auth.sql              # admin_accounts (first-boot setup lock)
+│       ├── 010_rolling_vault.sql           # rolling_vault sliding context window
+│       └── 011_settings_channels.sql       # system_settings seed (channel map, model names)
 │
 ├── orchestrator/
 │   ├── main.py                             # FastAPI app, pipeline wiring, API endpoints
@@ -317,7 +322,7 @@ docker compose up -d
 docker compose exec ironclad-db psql -U ironclad -d ironclad \
   -f /docker-entrypoint-initdb.d/001_schema.sql
 # Then run each migration in order:
-# migrations 002 through 006
+# migrations 002 through 011
 
 # 5. Pull an Ollama model
 docker compose exec ironclad-ollama ollama pull mistral:7b-instruct
@@ -356,10 +361,8 @@ docker compose exec ironclad-ollama ollama pull mistral:7b-instruct
 | `TTS_CACHE_DIR` | `/tmp/ironclad_tts` | TTS audio cache directory |
 | `AMBIENT_VOLUME` | `0.25` | Ambient audio volume (0.0–1.0) |
 | `TTS_VOLUME` | `0.90` | TTS voice volume (0.0–1.0) |
-| `CHANNEL_DUNGEON` | — | Discord channel ID for dungeon location |
-| `CHANNEL_PRISON` | — | Discord channel ID for prison location |
-| `CHANNEL_HOSPITAL` | — | Discord channel ID for hospital location |
-| `CHANNEL_MAIN` | — | Discord channel ID for main game channel |
+
+> **Note:** Discord channel IDs (dungeon, prison, hospital, main, etc.) are no longer set via environment variables. They are managed at runtime through **White Portal → Settings → Channel Map**.
 
 ### Adding Ambient Audio
 
@@ -406,17 +409,22 @@ deploy:
 | `/act <action>` | Perform a narrative action (triggers full pipeline) |
 | Free-text in game channel | Same as `/act` — natural language input |
 | `/rulebook <pdf>` | Upload a PDF rulebook for ingestion |
+| `/worlds` | List all discovered worlds with tone and tags |
+| `/switch_world <name>` | Bind the campaign to a world (creates it if new) |
 
 ---
 
 ## Web Admin Panel
 
-Access the Rule Forge at `http://localhost:8000/web/`:
+Access the White Portal at `http://localhost:8000/web/`:
 
 - **Dashboard** — Campaign overview and system status
 - **Rules** — Manage active rulebook modules per campaign
 - **Lore** — Browse and manage story facts / world canon
 - **Log** — Action log viewer with full pipeline replay
+- **Nodes** — AI node registry and connection dashboard
+- **Backchannel** — White Portal admin directive interface (OOC GM commands)
+- **Settings** — Runtime configuration: channel map, AI model selection, API keys
 
 ---
 

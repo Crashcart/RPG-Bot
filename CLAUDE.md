@@ -26,7 +26,7 @@ discord-bot/
   voice_manager.py  Voice channel audio, ambient loops, TTS playback
 db/
   schema.sql        Core tables
-  migrations/       001–009 SQL migrations (latest: 009_admin_auth.sql)
+  migrations/       001–011 SQL migrations (latest: 011_settings_channels.sql)
 csv-sync/           CSV export worker
 media-proxy/        Static asset server (:8001)
 health-sentinel/    Flask sidecar on :58291 — reports busy/ok status
@@ -128,7 +128,7 @@ data/
 
 Core tables: `campaigns`, `characters`, `inventories`, `action_log`, `sessions`, `story_facts`, `story_entities`, `vehicles`, `vehicle_subsystems`, `node_registry`, `global_settings`, `gm_directives`, `downtime_tasks`, `player_presence`, `retcon_log`, `admin_accounts`.
 
-Always run new migrations as `db/migrations/0NN_<name>.sql`. Never modify existing migration files.
+Always run new migrations as `db/migrations/0NN_<name>.sql`. Never modify existing migration files. Latest migration: `011_settings_channels.sql`.
 
 ## TDR Compliance Notes (Step 15)
 
@@ -166,8 +166,13 @@ Optional: `CLAUDE_API_KEY` + `CLOUD_PROVIDER=claude` to switch narration from Ge
 - `POST /api/rulebook/ingest` — PDF upload
 - `POST /api/vision/analyse` — image analysis (Gemini Vision)
 - `POST /api/web/search` — web search (SerpAPI / DuckDuckGo)
+- `GET /api/settings/channels` — fetch runtime channel map (used by Discord bot at startup)
 - `WS /ws/telemetry` — live pipeline event stream
 - `GET /web/*` — White Portal admin panel
+  - `/web/settings` — runtime config: channel map, AI model selection, API keys
+  - `POST /web/settings/general` — save general + AI settings
+  - `POST /web/settings/channels/add` — add or update a channel map entry
+  - `POST /web/settings/channels/delete` — remove a channel map entry
 
 ## Development Branch
 
