@@ -23,6 +23,11 @@ from .paradox_engine import ParadoxEngine
 from .prophetic_buffer import PropheticBuffer
 from .janitor import JanitorService
 from .world_registry import WorldRegistry
+from .image_gen import ImageGenService
+from .elevenlabs_client import ElevenLabsClient
+from .handout_service import HandoutService
+from .faction_service import FactionService
+from .openai_compat_client import OpenAICompatClient
 
 __all__ = [
     "DatabaseService",
@@ -50,4 +55,9 @@ __all__ = [
     "PropheticBuffer",
     "JanitorService",
     "WorldRegistry",
+    "ImageGenService",
+    "ElevenLabsClient",
+    "HandoutService",
+    "FactionService",
+    "OpenAICompatClient",
 ]

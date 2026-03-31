@@ -81,6 +81,8 @@ class NodeRouter:
         self._db       = db
         self._settings = settings
         self._task: asyncio.Task | None = None
+        # Cache of cloud adjudication clients keyed by provider name
+        self._cloud_adj_cache: dict[str, "OpenAICompatClient"] = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -143,8 +145,28 @@ class NodeRouter:
 
     # ── Role-Based Client Selection (Priority Mode) ───────────────────────────
 
-    async def get_ollama_client_for_role(self, role: str) -> "OllamaClient | None":
-        """Return the highest-priority online node tagged with *role*."""
+    async def get_ollama_client_for_role(self, role: str):
+        """
+        Return the best client for *role*.
+
+        When 'adjudication_provider' system_setting is not 'ollama', returns a
+        cloud OpenAICompatClient instead of a local Ollama node, so the
+        adjudication and sub-agent dispatcher get cloud inference transparently.
+        """
+        # Check if cloud adjudication is active
+        provider = await self._db.get_system_setting("adjudication_provider", "ollama")
+        if provider != "ollama":
+            cloud = await self._get_cloud_adjudicator(provider)
+            if cloud and cloud.is_available():
+                logger.debug(
+                    "NodeRouter[role=%s]: routing to cloud provider '%s'", role, provider
+                )
+                return cloud
+            logger.warning(
+                "NodeRouter: cloud adjudication provider '%s' not configured — "
+                "falling back to Ollama", provider,
+            )
+
         from orchestrator.services.ollama_client import OllamaClient
 
         nodes = await self._db.get_nodes_for_role(role)
@@ -160,6 +182,53 @@ class NodeRouter:
 
         logger.warning("NodeRouter: no online node for role '%s'.", role)
         return None
+
+    async def _get_cloud_adjudicator(self, provider: str):
+        """
+        Return a cached OpenAICompatClient for the given provider.
+
+        For 'sillytavern' the base URL is read live from system_settings so
+        that White Portal URL changes are picked up without a restart
+        (cache is busted whenever the URL differs from the cached client's URL).
+        """
+        from orchestrator.services.openai_compat_client import OpenAICompatClient
+
+        # For SillyTavern, bust cache when the URL changes
+        if provider == "sillytavern":
+            st_url = await self._db.get_system_setting("sillytavern_url", default="")
+            cached = self._cloud_adj_cache.get("sillytavern")
+            if cached and cached._base_url == (st_url or "").rstrip("/"):
+                return cached
+            # Re-create with the current URL
+            self._cloud_adj_cache.pop("sillytavern", None)
+            if not st_url:
+                logger.warning(
+                    "NodeRouter: adjudication_provider='sillytavern' but no URL configured."
+                )
+                return None
+            try:
+                client = OpenAICompatClient("sillytavern", base_url=st_url)
+                self._cloud_adj_cache["sillytavern"] = client
+                return client
+            except Exception as exc:
+                logger.error("Failed to create SillyTavern client: %s", exc)
+                return None
+
+        if provider not in self._cloud_adj_cache:
+            try:
+                client = OpenAICompatClient(provider)
+                self._cloud_adj_cache[provider] = client
+            except (ValueError, Exception) as exc:
+                logger.error("Failed to create OpenAICompatClient for '%s': %s", provider, exc)
+                return None
+        return self._cloud_adj_cache.get(provider)
+
+    async def warmup_all_nodes(self) -> None:
+        """
+        Send a cheap warmup ping to all enabled Ollama nodes to keep models
+        loaded in VRAM.  Called by PropheticBuffer during idle prefetch.
+        """
+        await self._check_all_nodes()
 
     async def get_ollama_client(self) -> "OllamaClient":
         """

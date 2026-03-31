@@ -67,10 +67,22 @@
         <div class="form-row">
           <label for="cloud_provider">Cloud Storyteller</label>
           <select id="cloud_provider" name="cloud_provider">
-            <option value="gemini" {% if cloud_provider == "gemini" %}selected{% endif %}>Gemini (Google)</option>
-            <option value="claude" {% if cloud_provider == "claude" %}selected{% endif %}>Claude (Anthropic)</option>
+            <option value="gemini"        {% if cloud_provider == "gemini"        %}selected{% endif %}>Gemini (Google)</option>
+            <option value="claude"        {% if cloud_provider == "claude"        %}selected{% endif %}>Claude (Anthropic)</option>
+            <option value="sillytavern"   {% if cloud_provider == "sillytavern"   %}selected{% endif %}>SillyTavern (External)</option>
           </select>
-          <p class="hint">Which cloud API handles Phase 4 narrative prose. Toggle the raw on/off switch on the <a href="/web/nodes" style="color:var(--gold)">Nodes</a> page.</p>
+          <p class="hint">Which API handles Phase 4 narrative prose. Toggle local/cloud on the <a href="/web/nodes" style="color:var(--gold)">Nodes</a> page.</p>
+        </div>
+        <div class="form-row">
+          <label for="adjudication_provider">Adjudication Engine</label>
+          <select id="adjudication_provider" name="adjudication_provider">
+            <option value="ollama"      {% if adjudication_provider == "ollama"      %}selected{% endif %}>Ollama (Local)</option>
+            <option value="groq"        {% if adjudication_provider == "groq"        %}selected{% endif %}>Groq</option>
+            <option value="openrouter"  {% if adjudication_provider == "openrouter"  %}selected{% endif %}>OpenRouter</option>
+            <option value="together"    {% if adjudication_provider == "together"    %}selected{% endif %}>Together AI</option>
+            <option value="sillytavern" {% if adjudication_provider == "sillytavern" %}selected{% endif %}>SillyTavern (External)</option>
+          </select>
+          <p class="hint">Phase 2 mechanical resolution engine. Cloud providers reduce local GPU load.</p>
         </div>
 
         <div class="divider-label">AI Models</div>
@@ -209,6 +221,113 @@
           <code>SESSION_SECRET_KEY</code>.
         </p>
       </div>
+    </div>
+  </div>
+
+  {# ── Card 3: SillyTavern Integration ─────────────────────────────────────── #}
+  <div class="card" style="grid-column: 1 / -1">
+    <div class="card-header">
+      <span class="card-title">SillyTavern Integration</span>
+      {% if sillytavern_connected %}
+        <span class="configured-badge" style="margin-left:auto">● Connected</span>
+      {% else %}
+        <span class="not-set-badge" style="margin-left:auto">Not configured</span>
+      {% endif %}
+    </div>
+    <div class="card-body">
+      <p class="hint" style="margin-bottom:16px">
+        Connect to an <strong>existing</strong> SillyTavern instance running elsewhere on your network.
+        SillyTavern is <strong>not installed</strong> as part of this stack — you bring your own.
+        Once connected, SillyTavern can be selected as the <em>Adjudication Engine</em> or
+        <em>Cloud Storyteller</em> above, routing inference through whatever backend
+        (Ollama, KoboldAI, Claude, etc.) SillyTavern is already using.
+      </p>
+
+      <form method="post" action="/web/settings/general">
+        {# Re-send all other general fields as hidden so ST fields don't clobber them #}
+        <input type="hidden" name="admin_role_name"       value="{{ admin_role_name }}">
+        <input type="hidden" name="session_ttl"           value="{{ session_ttl }}">
+        <input type="hidden" name="gemini_model"          value="{{ gemini_model }}">
+        <input type="hidden" name="ollama_model"          value="{{ ollama_model }}">
+        <input type="hidden" name="claude_model"          value="{{ claude_model }}">
+        <input type="hidden" name="cloud_provider"        value="{{ cloud_provider }}">
+        <input type="hidden" name="adjudication_provider" value="{{ adjudication_provider }}">
+
+        <div class="settings-grid" style="gap:12px">
+          <div class="form-row" style="margin-bottom:0">
+            <label for="sillytavern_url">SillyTavern API URL</label>
+            <input type="text" id="sillytavern_url" name="sillytavern_url"
+                   value="{{ sillytavern_url }}"
+                   placeholder="http://192.168.1.100:8000/api/openai/v1">
+            <p class="hint">
+              Full base URL of SillyTavern's OpenAI-compatible endpoint.
+              Enable it in SillyTavern → Extensions → API (or the OpenAI-proxy extension).
+              Leave blank to disable.
+            </p>
+          </div>
+
+          <div class="form-row" style="margin-bottom:0">
+            <label for="sillytavern_model">Model Hint <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
+            <input type="text" id="sillytavern_model" name="sillytavern_model"
+                   value="{{ sillytavern_model }}"
+                   placeholder="Leave blank to use SillyTavern's active model">
+            <p class="hint">
+              SillyTavern forwards requests to whichever model is selected in its own UI.
+              You only need this if you want to override that choice programmatically.
+            </p>
+          </div>
+
+          <div class="form-row" style="margin-bottom:0">
+            <label>API Key <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
+            <div class="api-key-row">
+              <input type="password" name="sillytavern_api_key"
+                     placeholder="Leave blank if ST has no key protection"
+                     autocomplete="new-password">
+              {% if sillytavern_api_key_set %}
+                <span class="configured-badge">● Configured</span>
+              {% else %}
+                <span class="not-set-badge">Not set</span>
+              {% endif %}
+            </div>
+            <p class="hint">
+              Only required if you enabled <em>API key protection</em> in SillyTavern → User Settings.
+            </p>
+          </div>
+
+          <div class="form-row" style="margin-bottom:0">
+            <label>Status</label>
+            {% if sillytavern_connected %}
+              <div style="display:flex;align-items:center;gap:10px;margin-top:4px">
+                <span class="configured-badge">● URL configured</span>
+                <span class="hint" style="margin:0">
+                  Set <em>Adjudication Engine</em> or <em>Cloud Storyteller</em> to
+                  <strong>SillyTavern (External)</strong> above to route inference through it.
+                </span>
+              </div>
+            {% else %}
+              <div style="display:flex;align-items:center;gap:10px;margin-top:4px">
+                <span class="not-set-badge">Disabled</span>
+                <span class="hint" style="margin:0">Enter a URL above and save to enable.</span>
+              </div>
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="restart-note" style="margin-top:16px">
+          ⚠ URL and API key changes are stored immediately but the inference clients pick them up after restart.
+        </div>
+
+        <div style="margin-top:16px">
+          <button type="submit" class="btn btn-gold">Save SillyTavern Settings</button>
+          {% if sillytavern_connected %}
+          <a href="{{ sillytavern_url | replace('/v1','') | replace('/api/openai','') }}"
+             target="_blank" rel="noopener"
+             class="btn" style="margin-left:8px;background:var(--bg);border:1px solid var(--border)">
+            Open SillyTavern ↗
+          </a>
+          {% endif %}
+        </div>
+      </form>
     </div>
   </div>
 

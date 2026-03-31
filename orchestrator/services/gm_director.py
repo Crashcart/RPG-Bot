@@ -61,7 +61,11 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from orchestrator.services.claude_client         import ClaudeClient
+    from orchestrator.services.elevenlabs_client     import ElevenLabsClient
+    from orchestrator.services.faction_service       import FactionService
     from orchestrator.services.gemini_client         import GeminiClient
+    from orchestrator.services.handout_service       import HandoutService
+    from orchestrator.services.image_gen             import ImageGenService
     from orchestrator.services.node_router           import NodeRouter
     from orchestrator.services.paradox_engine        import ParadoxEngine
     from orchestrator.services.reality_wall          import RealityWall
@@ -74,12 +78,16 @@ import asyncio
 
 from orchestrator.prompts.gm_prompts import (
     GM_DIRECTIVE_BLOCK,
+    GM_DIRECTOR_ORCHESTRATOR_CONTEXT,
     GM_PLANNING_PROMPT,
     GM_PLANNING_SYSTEM_PROMPT,
     GM_STAT_CHANGE_BLOCK,
     GM_SYNTHESIS_PROMPT,
     GM_SYSTEM_PROMPT,
+    MUSIC_SCENE_PROMPTS,
     STRUCTURAL_PATTERNS,
+    SUBAGENT_SCENE_DESCRIBER_PROMPT,
+    SUBAGENT_SOUND_DIRECTOR_PROMPT,
 )
 from orchestrator.prompts.immersion_prompts import (
     AMBIENT_AUDIO_MAP,
@@ -96,6 +104,8 @@ from orchestrator.schemas.payloads import (
     CharacterSnapshot,
     GMDirective,
     GMPlanResult,
+    MusicCue,
+    SFXCue,
     ThreadEvent,
     TTSCue,
     NarrativeResponsePayload,
@@ -134,6 +144,12 @@ class GMDirector:
         reality_wall:   "RealityWall | None" = None,
         paradox_engine: "ParadoxEngine | None" = None,
         world_registry: "WorldRegistry | None" = None,
+        # ── Multimedia services (optional) ────────────────────────────────
+        image_gen:      "ImageGenService | None" = None,
+        elevenlabs:     "ElevenLabsClient | None" = None,
+        handout_svc:    "HandoutService | None" = None,
+        faction_svc:    "FactionService | None" = None,
+        db=None,
     ) -> None:
         self._gemini         = gemini
         self._claude         = claude
@@ -145,6 +161,11 @@ class GMDirector:
         self._reality_wall   = reality_wall
         self._paradox_engine = paradox_engine
         self._world_registry = world_registry
+        self._image_gen      = image_gen
+        self._elevenlabs     = elevenlabs
+        self._handout_svc    = handout_svc
+        self._faction_svc    = faction_svc
+        self._db             = db
 
     # ── Public Interface ───────────────────────────────────────────────────────
 
@@ -203,6 +224,34 @@ class GMDirector:
                 storyteller=storyteller_name,
             )
 
+        # ── Inject multimedia sub-tasks into the plan ─────────────────────────
+        scene_brief = f"{resolution.action_type} — {player_intent[:120]}"
+        tone = "gritty"
+
+        # sound_director: always add unless it's a purely social turn
+        if resolution.action_type not in ("social_talk", "ooc"):
+            plan.sub_tasks.append(SubAgentTask(
+                task_type="sound_director",
+                entity_name="SFX",
+                entity_role="sound effect curator",
+                scene_context=scene_brief,
+                player_action_context=player_intent[:200],
+                tone=tone,
+                max_words=80,
+            ))
+
+        # scene_describer: add on major scene transitions (new location or combat start)
+        if plan.trigger_scene_image or is_combat_action(resolution.action_type):
+            plan.sub_tasks.append(SubAgentTask(
+                task_type="scene_describer",
+                entity_name="Scene",
+                entity_role="image generation prompt composer",
+                scene_context=scene_brief,
+                player_action_context=player_intent[:200],
+                tone=tone,
+                max_words=150,
+            ))
+
         # ── Step 4b: Sub-Agent Dispatch ────────────────────────────────────────
         sub_results = await self._dispatcher.dispatch_all(plan.sub_tasks)
 
@@ -256,7 +305,9 @@ class GMDirector:
             await self._telemetry.emit("synthesis_start", storyteller=storyteller_name)
 
         # ── Inject dynamic world tone + capture driftnet channel ─────────────
-        synthesis_system  = GM_SYSTEM_PROMPT
+        # Prepend orchestrator self-awareness context so the GM Director knows
+        # it commands Lyria, ElevenLabs, ImageGen, and sub-agent AIs.
+        synthesis_system  = GM_DIRECTOR_ORCHESTRATOR_CONTEXT + GM_SYSTEM_PROMPT
         driftnet_channel_id: str = ""
         if self._world_registry:
             try:
@@ -345,6 +396,46 @@ class GMDirector:
             if ch_action else None
         )
 
+        # ── Multimedia: SFX, Music, Scene Image ───────────────────────────────
+        sfx_cues: list[SFXCue] = []
+        scene_image_prompt: str | None = None
+
+        # Extract sound_director and scene_describer results
+        for r in sub_results:
+            if r.task.task_type == "sound_director":
+                sfx_cues = _parse_sfx_cues(r.raw_output)
+            elif r.task.task_type == "scene_describer":
+                scene_image_prompt = r.raw_output.strip()[:500] or None
+
+        # Music cue: build from ambient key + scene type
+        music_cue: MusicCue | None = None
+        scene_type = _resolve_scene_type(resolution.action_type, ambient_key)
+        if scene_type:
+            music_prompt = MUSIC_SCENE_PROMPTS.get(
+                scene_type,
+                f"atmospheric {scene_type} music, fantasy RPG setting"
+            )
+            music_cue = MusicCue(
+                scene_type=scene_type,
+                music_prompt=music_prompt,
+                lavalink_query=f"dark fantasy {scene_type} ambient music no copyright",
+            )
+            # Fire-and-forget: generate Lyria audio in background
+            asyncio.create_task(
+                _populate_music_cue_url(music_cue, self._gemini, self._db)
+            )
+
+        # Fire-and-forget faction adjustment
+        if self._faction_svc:
+            asyncio.create_task(
+                self._faction_svc.ai_adjust_from_narrative(
+                    campaign_id=campaign_id,
+                    player_id=character.character_id,
+                    narrative_excerpt=final_narrative[:800],
+                    action_type=resolution.action_type,
+                )
+            )
+
         # ── Build response ─────────────────────────────────────────────────────
         outcome_label = resolution.outcome.value.replace("_", " ").title()
         embed_title   = f"{character.name}: {outcome_label}"
@@ -354,7 +445,7 @@ class GMDirector:
 
         logger.info(
             "GM Director complete: storyteller=%s sub_agents=%d narrative=%d chars "
-            "whisper=%s tts_cues=%d thread=%s lethal=%s",
+            "whisper=%s tts_cues=%d thread=%s lethal=%s sfx=%d music=%s",
             storyteller_name,
             len(plan.sub_tasks),
             len(final_narrative),
@@ -362,6 +453,8 @@ class GMDirector:
             len(tts_cues),
             thread_ev.value if thread_ev else "none",
             commit.lethal,
+            len(sfx_cues),
+            scene_type or "none",
         )
 
         return NarrativeResponsePayload(
@@ -377,6 +470,10 @@ class GMDirector:
             tts_cues=tts_cues,
             channel_directive=channel_directive,
             driftnet_channel_id=driftnet_channel_id,
+            sfx_cues=sfx_cues,
+            music_cue=music_cue,
+            scene_image_prompt=scene_image_prompt,
+            npc_portrait_name=plan.trigger_npc_portrait,
         )
 
     # ── Private: Whisper Generation ───────────────────────────────────────────
@@ -735,3 +832,70 @@ def _infer_ambient_audio_key(resolution: OllamaResolutionPayload) -> str | None:
     if any(k in action for k in ("craft", "repair", "build", "create")):
         return AMBIENT_AUDIO_MAP.get("crafting/downtime")
     return None
+
+
+# ── Multimedia Helper Functions ────────────────────────────────────────────────
+
+def _parse_sfx_cues(raw_output: str) -> list[SFXCue]:
+    """
+    Parse the JSON output of a sound_director sub-agent into SFXCue objects.
+    Returns an empty list if parsing fails.
+    """
+    raw_output = raw_output.strip()
+    # Strip code fences
+    import re as _re
+    raw_output = _re.sub(r"^```(?:json)?\s*", "", raw_output)
+    raw_output = _re.sub(r"\s*```$", "", raw_output)
+    # Find the JSON array
+    start = raw_output.find("[")
+    end   = raw_output.rfind("]")
+    if start == -1 or end == -1 or end <= start:
+        return []
+    try:
+        items = json.loads(raw_output[start:end + 1])
+        cues = []
+        for item in items:
+            if isinstance(item, dict) and "description" in item:
+                cues.append(SFXCue(
+                    sfx_key=item["description"],
+                    delay_ms=int(item.get("delay_ms", 0)),
+                    source="elevenlabs",
+                ))
+        return cues[:3]  # max 3 SFX per turn
+    except Exception:
+        return []
+
+
+def _resolve_scene_type(action_type: str, ambient_key: str | None) -> str | None:
+    """Map action_type and ambient_key to a Lyria music scene type."""
+    action = action_type.lower()
+    if any(k in action for k in ("attack", "combat", "fight", "strike", "shoot", "explode")):
+        return "combat"
+    if any(k in action for k in ("speak", "talk", "persuade", "barter", "chat", "negotiate")):
+        return "social"
+    if any(k in action for k in ("sneak", "hide", "stealth", "search", "investigate", "explore")):
+        return "exploration"
+    if any(k in action for k in ("rest", "sleep", "camp", "craft", "repair", "downtime")):
+        return "rest"
+    if ambient_key and "tension" in ambient_key.lower():
+        return "tension"
+    return None
+
+
+async def _populate_music_cue_url(music_cue: MusicCue, gemini, db) -> None:
+    """
+    Background task: generate the Lyria audio and populate music_cue.audio_url.
+    The MusicCue object is mutated in place; the Discord bot reads audio_url
+    after a short delay when playing back.
+    """
+    try:
+        url = await gemini.generate_music(
+            music_prompt=music_cue.music_prompt,
+            scene_type=music_cue.scene_type,
+            db=db,
+        )
+        if url:
+            music_cue.audio_url = url
+            logger.debug("Music cue URL populated: %s → %s", music_cue.scene_type, url[:60])
+    except Exception as exc:
+        logger.warning("_populate_music_cue_url failed: %s", exc)

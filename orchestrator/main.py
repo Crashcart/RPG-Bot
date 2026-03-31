@@ -61,8 +61,12 @@ from orchestrator.services import (
     DatabaseService,
     DiskAgentService,
     DowntimeService,
+    ElevenLabsClient,
+    FactionService,
     GeminiClient,
     GMDirector,
+    HandoutService,
+    ImageGenService,
     NodeRouter,
     OllamaClient,
     RAGService,
@@ -103,6 +107,12 @@ pdf_processor = PDFProcessorService(
     chroma_host=settings.chroma_host,
     chroma_port=settings.chroma_port,
 )
+
+# ── Multimedia Services ────────────────────────────────────────────────────────
+image_gen   = ImageGenService(settings, db)
+elevenlabs  = ElevenLabsClient(settings)
+handout_svc = HandoutService(db, gemini)
+faction_svc = FactionService(db, gemini)
 
 # ── Tier 2: Sub-Agent Dispatcher ─────────────────────────────────────────────
 # Routes delegation tasks from the GM Director to actor/scribe Ollama nodes.
@@ -165,6 +175,11 @@ gm_director = GMDirector(
     reality_wall=reality_wall,
     paradox_engine=paradox_engine,
     world_registry=world_registry,
+    image_gen=image_gen,
+    elevenlabs=elevenlabs,
+    handout_svc=handout_svc,
+    faction_svc=faction_svc,
+    db=db,
 )
 
 # ── Rolling Vault (sliding context window, anti-overflow) ─────────────────────
@@ -953,6 +968,199 @@ async def api_vision_analyse(req: dict) -> dict:
     except Exception as exc:
         logger.exception("Vision analysis failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# System Settings Value Endpoint (used by bot / voice_manager for runtime config)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/settings/value", summary="Get a single system_setting value by key")
+async def api_settings_value(key: str) -> dict:
+    """Used by the Discord bot to read runtime settings (e.g. tts_provider, voice_idle_timeout_s)."""
+    value = await db.get_system_setting(key, default=None)
+    return {"key": key, "value": value}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multimedia API — SFX, Maps, Handouts, Factions, Music
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/sfx/generate", summary="Generate a one-shot SFX clip via ElevenLabs")
+async def api_sfx_generate(req: dict) -> dict:
+    """
+    Generate a short sound effect from a text description.
+    Returns media-proxy URL or raises 503 if ElevenLabs is not configured.
+    """
+    description = req.get("description", "").strip()
+    if not description:
+        raise HTTPException(status_code=400, detail="description required")
+    url = await elevenlabs.generate_sfx(description)
+    if not url:
+        raise HTTPException(
+            status_code=503,
+            detail="SFX generation failed — ELEVENLABS_API_KEY may not be set."
+        )
+    return {"url": url, "description": description}
+
+
+@app.post("/api/maps/generate", summary="Generate a scene image or NPC portrait")
+async def api_maps_generate(req: dict) -> dict:
+    """
+    Generate an image from a text prompt using the configured backend
+    (ComfyUI / Stability AI / DALL-E 3).  Saves to media-assets and returns URL.
+    """
+    prompt      = req.get("prompt", "").strip()
+    campaign_id = req.get("campaign_id", "")
+    intent_id   = req.get("intent_id")
+    portrait_npc = req.get("portrait_npc")
+
+    if not prompt or not campaign_id:
+        raise HTTPException(status_code=400, detail="prompt and campaign_id required")
+
+    url = await image_gen.generate(prompt)
+    if not url:
+        raise HTTPException(
+            status_code=503,
+            detail="Image generation unavailable — backend may be set to 'disabled'."
+        )
+
+    # Persist to DB
+    if portrait_npc:
+        await db.execute(
+            """INSERT INTO npc_portraits (npc_name, campaign_id, image_url)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (campaign_id, npc_name) DO UPDATE SET image_url = EXCLUDED.image_url""",
+            portrait_npc, campaign_id, url,
+        )
+    else:
+        await db.execute(
+            "INSERT INTO scene_images (campaign_id, prompt, image_url, intent_id) VALUES ($1,$2,$3,$4)",
+            campaign_id, prompt, url, intent_id,
+        )
+
+    return {"url": url, "prompt": prompt}
+
+
+@app.get("/api/maps/{campaign_id}", summary="List recent scene images for a campaign")
+async def api_maps_list(campaign_id: str, limit: int = 10) -> list[dict]:
+    rows = await db.fetch(
+        "SELECT id, prompt, image_url, generated_at FROM scene_images "
+        "WHERE campaign_id = $1 ORDER BY generated_at DESC LIMIT $2",
+        campaign_id, limit,
+    )
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/handouts/{handout_id}", summary="Get a single handout by ID")
+async def api_handout_get(handout_id: str) -> dict:
+    row = await db.fetchrow("SELECT * FROM handouts WHERE id = $1", handout_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Handout not found")
+    return dict(row)
+
+
+@app.get("/api/handouts/pending/{player_id}", summary="Get handouts for a player")
+async def api_handouts_pending(player_id: str, campaign_id: str | None = None) -> list[dict]:
+    if campaign_id:
+        rows = await db.fetch(
+            """SELECT h.* FROM handouts h
+               LEFT JOIN handout_recipients hr
+                 ON hr.handout_id = h.id AND hr.player_id = $1
+               WHERE h.campaign_id = $2 AND (h.is_global OR hr.handout_id IS NOT NULL)
+               ORDER BY h.created_at DESC""",
+            player_id, campaign_id,
+        )
+    else:
+        rows = await db.fetch(
+            """SELECT h.* FROM handouts h
+               JOIN handout_recipients hr ON hr.handout_id = h.id
+               WHERE hr.player_id = $1
+               ORDER BY h.created_at DESC""",
+            player_id,
+        )
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/handouts/deliver", summary="Mark a handout as delivered to a player")
+async def api_handout_deliver(req: dict) -> dict:
+    handout_id = req.get("handout_id", "")
+    player_id  = req.get("player_id", "")
+    if not handout_id or not player_id:
+        raise HTTPException(status_code=400, detail="handout_id and player_id required")
+    await handout_svc.deliver(handout_id, player_id)
+    return {"status": "delivered", "handout_id": handout_id, "player_id": player_id}
+
+
+@app.get("/api/factions/{campaign_id}/{player_id}", summary="Get faction standings for a player")
+async def api_faction_standings(campaign_id: str, player_id: str) -> list[dict]:
+    return await faction_svc.get_standings(player_id, campaign_id)
+
+
+@app.post("/api/music/feedback", summary="Submit music feedback (approve/disapprove)")
+async def api_music_feedback(req: dict) -> dict:
+    campaign_id    = req.get("campaign_id", "")
+    original_prompt = req.get("original_prompt", "")
+    audio_url      = req.get("audio_url", "")
+    approved       = req.get("approved")
+    feedback_note  = req.get("feedback_note", "")
+    player_id      = req.get("player_id", "")
+
+    if not campaign_id:
+        raise HTTPException(status_code=400, detail="campaign_id required")
+
+    await db.execute(
+        """INSERT INTO music_feedback (campaign_id, original_prompt, audio_url, approved,
+                                       feedback_note, player_id)
+           VALUES ($1, $2, $3, $4, $5, $6)""",
+        campaign_id, original_prompt, audio_url, approved, feedback_note, player_id,
+    )
+    return {"status": "ok"}
+
+
+@app.post("/api/music/generate", summary="Manually trigger music generation for a scene type")
+async def api_music_generate(req: dict) -> dict:
+    from orchestrator.prompts.gm_prompts import MUSIC_SCENE_PROMPTS
+    scene_type  = req.get("scene_type", "exploration")
+    campaign_id = req.get("campaign_id", "")
+    music_prompt = MUSIC_SCENE_PROMPTS.get(scene_type, MUSIC_SCENE_PROMPTS["exploration"])
+    audio_url = await gemini.generate_music(music_prompt, scene_type, db=db)
+    return {
+        "audio_url":    audio_url or "",
+        "scene_type":   scene_type,
+        "music_prompt": music_prompt,
+    }
+
+
+@app.post("/api/music/regenerate", summary="Regenerate music incorporating player feedback")
+async def api_music_regenerate(req: dict) -> dict:
+    original_prompt = req.get("original_prompt", "")
+    feedback_note   = req.get("feedback_note", "")
+    campaign_id     = req.get("campaign_id", "")
+    audio_url       = req.get("audio_url", "")
+    player_id       = req.get("player_id", "")
+    scene_type      = req.get("scene_type", "exploration")
+
+    if not original_prompt:
+        raise HTTPException(status_code=400, detail="original_prompt required")
+
+    # Log the negative feedback
+    await db.execute(
+        """INSERT INTO music_feedback (campaign_id, original_prompt, audio_url, approved,
+                                       feedback_note, player_id)
+           VALUES ($1, $2, $3, false, $4, $5)""",
+        campaign_id, original_prompt, audio_url, feedback_note, player_id,
+    )
+
+    corrected_prompt = (
+        f"{original_prompt}. Player feedback: {feedback_note}"
+        if feedback_note else original_prompt
+    )
+    new_url = await gemini.generate_music(corrected_prompt, scene_type, db=db)
+
+    return {
+        "audio_url":    new_url or "",
+        "music_prompt": corrected_prompt,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

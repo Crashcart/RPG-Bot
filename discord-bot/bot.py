@@ -123,10 +123,28 @@ class IroncladBot(commands.Bot):
             base_url=ORCHESTRATOR_URL,
             timeout=httpx.Timeout(connect=10, read=300, write=300, pool=10),
         )
+        # Share the HTTP client with VoiceManager for settings queries and TTS
+        self.voice_mgr.set_http_client(self._http_client)
         await self.tree.sync()
         logger.info("Slash commands synced.")
-        # Start the downtime notification poll loop
+        # Start background loops
         asyncio.create_task(_downtime_notifier_loop())
+        await self.voice_mgr.start_idle_watchdog()
+        # Register wavelink Lavalink node if configured
+        lavalink_pass = os.environ.get("LAVALINK_PASSWORD", "")
+        if lavalink_pass:
+            try:
+                import wavelink
+                lavalink_host = os.environ.get("LAVALINK_HOST", "lavalink")
+                node = wavelink.Node(
+                    uri=f"http://{lavalink_host}:2333", password=lavalink_pass
+                )
+                await wavelink.Pool.connect(nodes=[node], client=self)
+                logger.info("Wavelink: connected to Lavalink node at %s", lavalink_host)
+            except ImportError:
+                logger.debug("wavelink not installed — Lavalink fallback unavailable.")
+            except Exception as exc:
+                logger.warning("Wavelink connection failed: %s", exc)
 
     async def close(self) -> None:
         for guild in self.guilds:
@@ -194,6 +212,38 @@ async def on_presence_update(before: discord.Member, after: discord.Member) -> N
         )
     except Exception as exc:
         logger.debug("Presence update failed for %s: %s", after.name, exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Voice State — Idle Disconnect (immediate empty-channel detection)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@bot.event
+async def on_voice_state_update(
+    member: discord.Member,
+    before: discord.VoiceState,
+    after:  discord.VoiceState,
+) -> None:
+    """
+    Disconnect from a voice channel immediately when all human members leave.
+
+    This handles the "everyone left the session" case without waiting for the
+    idle watchdog timeout.  Complements the watchdog which handles gradual
+    inactivity.
+    """
+    if member.bot:
+        return  # ignore the bot's own state changes
+
+    if before.channel and before.channel != after.channel:
+        vc = before.channel.guild.voice_client
+        if vc and vc.channel == before.channel:
+            human_members = [m for m in before.channel.members if not m.bot]
+            if not human_members:
+                guild_id = before.channel.guild.id
+                await bot.voice_mgr.disconnect(guild_id)
+                logger.info(
+                    "Voice idle: all humans left '%s' — disconnected.", before.channel.name
+                )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -456,6 +506,49 @@ async def _deliver_narrative(
     if driftnet_id and guild and str(driftnet_id).isdigit():
         asyncio.create_task(_post_to_driftnet(guild, int(driftnet_id), embed, channel.id))
 
+    # 8. Lyria music cue
+    music_cue = data.get("music_cue")
+    if music_cue and isinstance(user, discord.Member) and guild:
+        bot.voice_mgr.track_activity(guild.id)
+        asyncio.create_task(bot.voice_mgr.play_music(
+            guild_id       = guild.id,
+            audio_url      = music_cue.get("audio_url", ""),
+            volume         = music_cue.get("volume", 0.45),
+            crossfade_s    = music_cue.get("crossfade_s", 2.0),
+            lavalink_query = music_cue.get("lavalink_query", ""),
+            music_prompt   = music_cue.get("music_prompt", ""),
+        ))
+
+    # 9. SFX cues (fire-and-forget, serially by delay)
+    for sfx in data.get("sfx_cues", []):
+        if guild:
+            asyncio.create_task(bot.voice_mgr.play_sfx(
+                guild_id = guild.id,
+                source   = sfx.get("sfx_key", ""),
+                volume   = sfx.get("volume", 0.7),
+                delay_ms = sfx.get("delay_ms", 0),
+            ))
+
+    # 10. Scene Painter — generate scene image and edit embed with it
+    scene_prompt = data.get("scene_image_prompt")
+    if scene_prompt and guild and data.get("campaign_id"):
+        asyncio.create_task(_generate_and_attach_scene_image(
+            sent_msg, guild.id, scene_prompt,
+            data.get("campaign_id"), data.get("intent_id"),
+        ))
+
+    # 11. NPC Portrait generation
+    npc_portrait_name = data.get("npc_portrait_name")
+    if npc_portrait_name and data.get("campaign_id"):
+        asyncio.create_task(_generate_npc_portrait(
+            npc_portrait_name, data["campaign_id"]
+        ))
+
+    # 12. Auto-deliver handout via DM
+    handout_id = data.get("handout_id")
+    if handout_id:
+        asyncio.create_task(_deliver_handout_dm(user, handout_id))
+
 
 # ── 1. Paranoia Whisper System ─────────────────────────────────────────────────
 
@@ -516,6 +609,79 @@ async def _post_to_driftnet(
         logger.debug("Driftnet: missing send permission for channel %d", driftnet_id)
     except Exception as exc:
         logger.warning("Driftnet broadcast failed for channel %d: %s", driftnet_id, exc)
+
+
+# ── Multimedia Delivery Helpers ───────────────────────────────────────────────
+
+async def _generate_and_attach_scene_image(
+    sent_msg:    discord.Message,
+    guild_id:    int,
+    prompt:      str,
+    campaign_id: str,
+    intent_id:   str | None,
+) -> None:
+    """Generate a scene image via the orchestrator and edit the embed with it."""
+    try:
+        resp = await bot.http_client.post(
+            "/api/maps/generate",
+            json={"prompt": prompt, "campaign_id": campaign_id, "intent_id": intent_id},
+            timeout=60,
+        )
+        if resp.status_code == 200:
+            url = resp.json().get("url")
+            if url:
+                new_embed = sent_msg.embeds[0].copy() if sent_msg.embeds else discord.Embed()
+                new_embed.set_image(url=url)
+                await sent_msg.edit(embed=new_embed)
+                logger.info("Scene image attached: %s", url)
+    except Exception as exc:
+        logger.debug("Scene image generation failed: %s", exc)
+
+
+async def _generate_npc_portrait(npc_name: str, campaign_id: str) -> None:
+    """Request NPC portrait generation in the background (fire-and-forget)."""
+    try:
+        await bot.http_client.post(
+            "/api/maps/generate",
+            json={
+                "prompt": f"Portrait of {npc_name}, fantasy RPG character art, detailed face",
+                "campaign_id": campaign_id,
+                "portrait_npc": npc_name,
+            },
+            timeout=60,
+        )
+    except Exception as exc:
+        logger.debug("NPC portrait generation failed for %s: %s", npc_name, exc)
+
+
+async def _deliver_handout_dm(
+    user:       discord.Member | discord.User,
+    handout_id: str,
+) -> None:
+    """Fetch a handout and DM it to the player."""
+    try:
+        resp = await bot.http_client.get(f"/api/handouts/{handout_id}")
+        if resp.status_code != 200:
+            return
+        h = resp.json()
+        embed = discord.Embed(
+            title=h.get("title", "Handout"),
+            description=h.get("content_text", "")[:4000],
+            colour=0xC9A84C,
+        )
+        embed.set_footer(text=f"Type: {h.get('handout_type', 'general').replace('_', ' ').title()}")
+        if h.get("image_url"):
+            embed.set_image(url=h["image_url"])
+        await user.send(embed=embed)
+        # Mark delivered
+        await bot.http_client.post(
+            "/api/handouts/deliver",
+            json={"handout_id": handout_id, "player_id": str(user.id)},
+        )
+    except discord.Forbidden:
+        logger.debug("Could not DM handout to %s — DMs disabled.", user.name)
+    except Exception as exc:
+        logger.debug("Handout DM failed: %s", exc)
 
 
 # ── 2. Ghost Sheet — Ephemeral Combat Threads ─────────────────────────────────
@@ -973,6 +1139,47 @@ async def slash_act(
             asyncio.create_task(
                 _handle_channel_directive(interaction.user, interaction.guild, data["channel_directive"])
             )
+
+        # Music cue
+        music_cue = data.get("music_cue")
+        if music_cue and isinstance(interaction.user, discord.Member) and interaction.guild:
+            bot.voice_mgr.track_activity(interaction.guild.id)
+            asyncio.create_task(bot.voice_mgr.play_music(
+                guild_id       = interaction.guild.id,
+                audio_url      = music_cue.get("audio_url", ""),
+                volume         = music_cue.get("volume", 0.45),
+                crossfade_s    = music_cue.get("crossfade_s", 2.0),
+                lavalink_query = music_cue.get("lavalink_query", ""),
+                music_prompt   = music_cue.get("music_prompt", ""),
+            ))
+
+        # SFX cues
+        for sfx in data.get("sfx_cues", []):
+            if interaction.guild:
+                asyncio.create_task(bot.voice_mgr.play_sfx(
+                    guild_id = interaction.guild.id,
+                    source   = sfx.get("sfx_key", ""),
+                    volume   = sfx.get("volume", 0.7),
+                    delay_ms = sfx.get("delay_ms", 0),
+                ))
+
+        # Scene image
+        scene_prompt = data.get("scene_image_prompt")
+        if scene_prompt and interaction.guild and data.get("campaign_id"):
+            asyncio.create_task(_generate_and_attach_scene_image(
+                sent_msg, interaction.guild.id, scene_prompt,
+                data["campaign_id"], data.get("intent_id"),
+            ))
+
+        # NPC portrait
+        if data.get("npc_portrait_name") and data.get("campaign_id"):
+            asyncio.create_task(_generate_npc_portrait(
+                data["npc_portrait_name"], data["campaign_id"]
+            ))
+
+        # Auto-deliver handout
+        if data.get("handout_id"):
+            asyncio.create_task(_deliver_handout_dm(interaction.user, data["handout_id"]))
 
         # Ghost Continuity: mark this intent delivered so it won't be re-sent on reconnect
         if data.get("intent_id"):
@@ -1761,6 +1968,415 @@ async def slash_switch_world(
     except Exception as exc:
         logger.exception("Slash /switch_world failed: %s", exc)
         await interaction.followup.send("⚠️ World switch failed. Check the logs.", ephemeral=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Handout Commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+handout_group = app_commands.Group(name="handout", description="View handouts delivered by the GM.")
+
+
+@handout_group.command(name="list", description="List all handouts you have received.")
+async def handout_list(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True)
+
+    if not interaction.guild_id:
+        await interaction.followup.send("⚠️ Use this in a server.", ephemeral=True)
+        return
+
+    campaign = await _fetch_active_campaign(str(interaction.guild_id))
+    if not campaign:
+        await interaction.followup.send("⚠️ No active campaign.", ephemeral=True)
+        return
+
+    try:
+        resp = await bot.http_client.get(
+            f"/api/handouts/pending/{interaction.user.id}",
+            params={"campaign_id": campaign["id"]},
+        )
+        resp.raise_for_status()
+        handouts = resp.json()
+    except Exception as exc:
+        logger.exception("Handout list failed: %s", exc)
+        await interaction.followup.send("⚠️ Could not retrieve handouts.", ephemeral=True)
+        return
+
+    if not handouts:
+        await interaction.followup.send(
+            "📜 You have no handouts yet. The GM will deliver them as the story unfolds.",
+            ephemeral=True,
+        )
+        return
+
+    embed = discord.Embed(
+        title="📜 Your Handouts",
+        description="Use `/handout view <id>` to read a handout in full.",
+        colour=0xC9A84C,
+    )
+    for h in handouts[:10]:
+        embed.add_field(
+            name=f"{h.get('title', 'Untitled')}  `{str(h['id'])[:8]}`",
+            value=f"*{h.get('handout_type', 'general').replace('_', ' ').title()}*",
+            inline=False,
+        )
+    if len(handouts) > 10:
+        embed.set_footer(text=f"Showing 10 of {len(handouts)}")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@handout_group.command(name="view", description="Read the contents of a handout.")
+@app_commands.describe(handout_id="The handout ID (first 8 chars are enough)")
+async def handout_view(interaction: discord.Interaction, handout_id: str) -> None:
+    await interaction.response.defer(ephemeral=True)
+    try:
+        resp = await bot.http_client.get(f"/api/handouts/{handout_id}")
+        if resp.status_code == 404:
+            await interaction.followup.send("⚠️ Handout not found.", ephemeral=True)
+            return
+        resp.raise_for_status()
+        h = resp.json()
+    except Exception as exc:
+        logger.exception("Handout view failed: %s", exc)
+        await interaction.followup.send("⚠️ Could not retrieve handout.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title=h.get("title", "Untitled"),
+        description=h.get("content_text", "")[:4000],
+        colour=0xC9A84C,
+    )
+    embed.set_footer(text=f"Type: {h.get('handout_type', 'general').replace('_', ' ').title()}")
+    if h.get("image_url"):
+        embed.set_image(url=h["image_url"])
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+bot.tree.add_command(handout_group)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Map Commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+map_group = app_commands.Group(name="map", description="Generate and view scene maps.")
+
+
+@map_group.command(name="generate", description="[GM only] Generate a scene image from a description.")
+@app_commands.describe(description="Describe the scene to paint (e.g. 'stone dungeon with glowing altar')")
+async def map_generate(interaction: discord.Interaction, description: str) -> None:
+    await interaction.response.defer()
+
+    if isinstance(interaction.user, discord.Member):
+        has_admin = any(r.name == _ADMIN_ROLE_NAME for r in interaction.user.roles)
+    else:
+        has_admin = False
+
+    if not has_admin:
+        await interaction.followup.send(
+            f"⚠️ Only **{_ADMIN_ROLE_NAME}** members can generate maps.", ephemeral=True
+        )
+        return
+
+    if not interaction.guild_id:
+        await interaction.followup.send("⚠️ Use this in a server.", ephemeral=True)
+        return
+
+    campaign = await _fetch_active_campaign(str(interaction.guild_id))
+    if not campaign:
+        await interaction.followup.send("⚠️ No active campaign.", ephemeral=True)
+        return
+
+    await interaction.followup.send("🎨 Generating scene image…")
+
+    try:
+        resp = await bot.http_client.post(
+            "/api/maps/generate",
+            json={"prompt": description, "campaign_id": campaign["id"]},
+            timeout=90,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.exception("Map generate failed: %s", exc)
+        await interaction.edit_original_response(content="⚠️ Image generation failed. Check that an image backend is enabled in Settings.")
+        return
+
+    url = data.get("url")
+    if not url:
+        await interaction.edit_original_response(content="⚠️ No image returned. Image generation may be disabled.")
+        return
+
+    embed = discord.Embed(title=f"🗺 {description[:80]}", colour=0x5c8fd6)
+    embed.set_image(url=url)
+    await interaction.edit_original_response(content=None, embed=embed)
+
+
+@map_group.command(name="show", description="Show the most recent scene image for this campaign.")
+async def map_show(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True)
+
+    if not interaction.guild_id:
+        await interaction.followup.send("⚠️ Use this in a server.", ephemeral=True)
+        return
+
+    campaign = await _fetch_active_campaign(str(interaction.guild_id))
+    if not campaign:
+        await interaction.followup.send("⚠️ No active campaign.", ephemeral=True)
+        return
+
+    try:
+        resp = await bot.http_client.get(f"/api/maps/{campaign['id']}", params={"limit": 1})
+        resp.raise_for_status()
+        images = resp.json()
+    except Exception as exc:
+        logger.exception("Map show failed: %s", exc)
+        await interaction.followup.send("⚠️ Could not retrieve scene images.", ephemeral=True)
+        return
+
+    if not images:
+        await interaction.followup.send("No scene images have been generated yet.", ephemeral=True)
+        return
+
+    img = images[0]
+    embed = discord.Embed(title="🗺 Current Scene", colour=0x5c8fd6)
+    embed.set_image(url=img.get("image_url", ""))
+    embed.set_footer(text=img.get("prompt", "")[:100])
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+bot.tree.add_command(map_group)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reputation Command
+# ─────────────────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="reputation", description="View your standing with factions in this campaign.")
+async def slash_reputation(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True)
+
+    if not interaction.guild_id:
+        await interaction.followup.send("⚠️ Use this in a server.", ephemeral=True)
+        return
+
+    campaign = await _fetch_active_campaign(str(interaction.guild_id))
+    if not campaign:
+        await interaction.followup.send("⚠️ No active campaign.", ephemeral=True)
+        return
+
+    try:
+        resp = await bot.http_client.get(
+            f"/api/factions/{campaign['id']}/{interaction.user.id}"
+        )
+        resp.raise_for_status()
+        standings = resp.json()
+    except Exception as exc:
+        logger.exception("Reputation fetch failed: %s", exc)
+        await interaction.followup.send("⚠️ Could not retrieve reputation data.", ephemeral=True)
+        return
+
+    if not standings:
+        await interaction.followup.send(
+            "No factions are tracked in this campaign yet.", ephemeral=True
+        )
+        return
+
+    _LABEL_COLOURS = {
+        "Allied":   0x00FF88,
+        "Friendly": 0x44BB44,
+        "Neutral":  0xAAAA44,
+        "Cautious": 0xFFAA00,
+        "Hostile":  0xFF4444,
+        "Enemy":    0x880000,
+    }
+
+    embed = discord.Embed(
+        title="⚔ Faction Reputation",
+        colour=0x7B68EE,
+    )
+    for s in standings:
+        label  = s.get("label", "Neutral")
+        score  = s.get("score", 0)
+        colour = _LABEL_COLOURS.get(label, 0x888888)
+        bar    = _progress_bar(max(0, min(100, (score + 100) // 2)))
+        embed.add_field(
+            name=s.get("name", "Unknown"),
+            value=f"`{bar}` **{label}** ({score:+d})",
+            inline=False,
+        )
+    embed.set_footer(text=f"Player: {interaction.user.display_name}")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Music Commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+music_group = app_commands.Group(name="music", description="Control and rate the GM's music selection.")
+
+# guild_id → {prompt, audio_url, campaign_id}  (current track metadata for feedback)
+_current_music_meta: dict[str, dict] = {}
+
+
+@music_group.command(name="approve", description="Approve the current music track.")
+async def music_approve(interaction: discord.Interaction) -> None:
+    """Log a positive rating for the current track (thumbs up)."""
+    await interaction.response.defer(ephemeral=True)
+
+    guild_id = str(interaction.guild_id or "DM")
+    meta = _current_music_meta.get(guild_id)
+    if not meta:
+        await interaction.followup.send("No music is currently tracked for this session.", ephemeral=True)
+        return
+
+    try:
+        await bot.http_client.post(
+            "/api/music/feedback",
+            json={
+                "campaign_id":    meta.get("campaign_id", ""),
+                "original_prompt": meta.get("prompt", ""),
+                "audio_url":      meta.get("audio_url", ""),
+                "approved":       True,
+                "feedback_note":  "",
+                "player_id":      str(interaction.user.id),
+            },
+        )
+    except Exception as exc:
+        logger.debug("Music feedback (approve) failed: %s", exc)
+
+    await interaction.followup.send("👍 Thanks — your rating helps the GM tune future sessions.", ephemeral=True)
+
+
+@music_group.command(name="skip", description="Skip the current music without feedback.")
+async def music_skip(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True)
+
+    if not interaction.guild_id:
+        await interaction.followup.send("⚠️ Use this in a server.", ephemeral=True)
+        return
+
+    await bot.voice_mgr.stop_music(interaction.guild_id)
+    await interaction.followup.send("⏭ Music skipped.", ephemeral=True)
+
+
+@music_group.command(name="change", description="Request a different vibe and suggest how to improve it.")
+@app_commands.describe(note="What would make the music better? (e.g. 'more tense', 'softer, we're in a tavern')")
+async def music_change(interaction: discord.Interaction, note: str) -> None:
+    """Rate negatively and request regeneration with the player's suggestion."""
+    await interaction.response.defer(ephemeral=True)
+
+    if not interaction.guild_id:
+        await interaction.followup.send("⚠️ Use this in a server.", ephemeral=True)
+        return
+
+    guild_id = str(interaction.guild_id)
+    meta = _current_music_meta.get(guild_id)
+
+    # Stop current music
+    await bot.voice_mgr.stop_music(interaction.guild_id)
+
+    if not meta or not meta.get("prompt"):
+        await interaction.followup.send(
+            "⏭ Music stopped. No prompt available for regeneration.", ephemeral=True
+        )
+        return
+
+    await interaction.followup.send("🎵 Regenerating music with your feedback…", ephemeral=True)
+
+    try:
+        resp = await bot.http_client.post(
+            "/api/music/regenerate",
+            json={
+                "campaign_id":    meta.get("campaign_id", ""),
+                "original_prompt": meta.get("prompt", ""),
+                "audio_url":      meta.get("audio_url", ""),
+                "feedback_note":  note,
+                "player_id":      str(interaction.user.id),
+            },
+            timeout=120,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            new_url = data.get("audio_url", "")
+            if new_url and interaction.guild_id:
+                asyncio.create_task(bot.voice_mgr.play_music(
+                    guild_id    = interaction.guild_id,
+                    audio_url   = new_url,
+                    volume      = 0.45,
+                    crossfade_s = 1.0,
+                ))
+                _current_music_meta[guild_id] = {
+                    **meta,
+                    "audio_url": new_url,
+                }
+    except Exception as exc:
+        logger.debug("Music regeneration failed: %s", exc)
+
+
+@music_group.command(name="play", description="[GM only] Manually trigger a music change.")
+@app_commands.describe(scene_type="Scene type: combat, exploration, social, tension, rest")
+async def music_play(interaction: discord.Interaction, scene_type: str) -> None:
+    await interaction.response.defer(ephemeral=True)
+
+    if isinstance(interaction.user, discord.Member):
+        has_admin = any(r.name == _ADMIN_ROLE_NAME for r in interaction.user.roles)
+    else:
+        has_admin = False
+
+    if not has_admin:
+        await interaction.followup.send(
+            f"⚠️ Only **{_ADMIN_ROLE_NAME}** members can manually trigger music.", ephemeral=True
+        )
+        return
+
+    if not interaction.guild_id:
+        await interaction.followup.send("⚠️ Use this in a server.", ephemeral=True)
+        return
+
+    campaign = await _fetch_active_campaign(str(interaction.guild_id))
+    if not campaign:
+        await interaction.followup.send("⚠️ No active campaign.", ephemeral=True)
+        return
+
+    try:
+        resp = await bot.http_client.post(
+            "/api/music/generate",
+            json={"scene_type": scene_type, "campaign_id": campaign["id"]},
+            timeout=90,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        url  = data.get("audio_url", "")
+    except Exception as exc:
+        logger.exception("Manual music generate failed: %s", exc)
+        await interaction.followup.send("⚠️ Music generation failed.", ephemeral=True)
+        return
+
+    if url:
+        asyncio.create_task(bot.voice_mgr.play_music(
+            guild_id    = interaction.guild_id,
+            audio_url   = url,
+            volume      = 0.45,
+            crossfade_s = 1.5,
+        ))
+        guild_id_str = str(interaction.guild_id)
+        _current_music_meta[guild_id_str] = {
+            "prompt": data.get("music_prompt", ""),
+            "audio_url": url,
+            "campaign_id": campaign["id"],
+        }
+        await interaction.followup.send(
+            f"🎵 Playing **{scene_type}** music.", ephemeral=True
+        )
+    else:
+        await interaction.followup.send(
+            "⚠️ No audio generated. Music may be disabled or use lavalink fallback.",
+            ephemeral=True,
+        )
+
+
+bot.tree.add_command(music_group)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
+from pathlib import Path
 
 import httpx
 
@@ -16,12 +18,20 @@ logger = logging.getLogger(__name__)
 
 _GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
+# Lyria 3 model IDs
+_LYRIA_CLIP  = "lyria-3-clip-preview"   # 30-second clips
+_LYRIA_PRO   = "lyria-3-pro-preview"    # up to 3 minutes
+
+_MUSIC_ASSET_DIR = Path("/app/assets/music")
+
 
 class GeminiClient:
     def __init__(self, settings: Settings) -> None:
+        self._settings  = settings
         self._api_key   = settings.gemini_api_key
         self._model     = settings.gemini_model
         self._node_name = "gemini-cloud"
+        self._media_url = settings.media_proxy_url
 
     # ── Generic text generation (used by GMDirector) ─────────────────────────
 
@@ -72,6 +82,99 @@ class GeminiClient:
         except (KeyError, IndexError) as exc:
             logger.error("Unexpected Gemini response in generate(): %s", json.dumps(data)[:400])
             raise ValueError("Could not extract text from Gemini response.") from exc
+
+    # ── Lyria 3 Music Generation ─────────────────────────────────────────────
+
+    async def generate_music(
+        self,
+        music_prompt: str,
+        scene_type:   str,
+        duration:     str = "clip",
+        db=None,
+    ) -> str | None:
+        """
+        Generate ambient music using Gemini Lyria 3.
+
+        The audio bytes returned by the API are saved to /app/assets/music/
+        and served via the media-proxy.  Subsequent calls with the same prompt
+        return the cached URL immediately (SHA-256 key).
+
+        Args:
+            music_prompt: Descriptive prose for Lyria (tempo, instruments, mood).
+            scene_type:   Semantic label for logging (combat, exploration, etc.).
+            duration:     "clip" → lyria-3-clip-preview (30 s)
+                          "long" → lyria-3-pro-preview (up to 3 min)
+            db:           Optional DatabaseService — if provided, reads 'music_model'
+                          from system_settings.  Returns None immediately when model
+                          is set to 'lavalink'.
+
+        Returns:
+            Media-proxy URL (str) or None on failure / when Lyria is disabled.
+        """
+        # Check runtime setting if DB is available
+        if db is not None:
+            music_model = await db.get_system_setting("music_model", "lyria-3-clip-preview")
+            if music_model == "lavalink":
+                logger.debug("generate_music: music_model=lavalink — skipping Lyria")
+                return None
+            lyria_model = _LYRIA_PRO if music_model == _LYRIA_PRO else _LYRIA_CLIP
+        else:
+            lyria_model = _LYRIA_PRO if duration == "long" else _LYRIA_CLIP
+
+        # Cache by SHA-256 of prompt + model
+        cache_key  = hashlib.sha256(f"{lyria_model}:{music_prompt}".encode()).hexdigest()[:24]
+        _MUSIC_ASSET_DIR.mkdir(parents=True, exist_ok=True)
+        cache_path = _MUSIC_ASSET_DIR / f"{cache_key}.mp3"
+        if cache_path.exists():
+            logger.debug("Music cache hit: %s (%s)", scene_type, cache_key)
+            return f"{self._media_url}/music/{cache_key}.mp3"
+
+        payload = {
+            "contents": [{"parts": [{"text": music_prompt}]}],
+            "generationConfig": {
+                "responseModalities": ["AUDIO"],
+            },
+        }
+        url = f"{_GEMINI_API_BASE}/{lyria_model}:generateContent?key={self._api_key}"
+
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                response = await client.post(url, json=payload)
+                response.raise_for_status()
+
+            data = response.json()
+            # Audio is returned as base64-encoded data in inline_data
+            parts = data["candidates"][0]["content"]["parts"]
+            audio_b64 = None
+            for part in parts:
+                if "inlineData" in part:
+                    audio_b64 = part["inlineData"]["data"]
+                    break
+                if "inline_data" in part:
+                    audio_b64 = part["inline_data"]["data"]
+                    break
+
+            if not audio_b64:
+                logger.error("Lyria returned no audio data for scene_type=%s", scene_type)
+                return None
+
+            audio_bytes = base64.b64decode(audio_b64)
+            cache_path.write_bytes(audio_bytes)
+            logger.info(
+                "Lyria music generated: scene=%s model=%s size=%d bytes",
+                scene_type, lyria_model, len(audio_bytes),
+            )
+            return f"{self._media_url}/music/{cache_key}.mp3"
+
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "Lyria HTTP error %s for scene_type=%s: %s",
+                exc.response.status_code, scene_type, exc.response.text[:200],
+            )
+            return None
+        except Exception as exc:
+            logger.error("Lyria generation error for scene_type=%s: %s", scene_type, exc)
+            return None
 
     # ── Visual Intel — Image Analysis ────────────────────────────────────────
 
