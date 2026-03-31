@@ -491,27 +491,38 @@ _CHANNEL_KEY_RE = re.compile(r'^[a-z0-9_]{1,32}$')
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
     db = _db(request)
-    channel_map     = await db.get_system_setting("channel_map",         default={})
-    admin_role_name = await db.get_system_setting("admin_role_name",     default="GM")
-    session_ttl     = await db.get_system_setting("session_ttl_seconds", default=3600)
-    gemini_model    = await db.get_system_setting("gemini_model",        default="gemini-1.5-pro")
-    ollama_model    = await db.get_system_setting("ollama_model",        default="mistral:7b-instruct")
-    claude_model    = await db.get_system_setting("claude_model",        default="claude-sonnet-4-6")
-    cloud_provider  = await db.get_system_setting("cloud_provider",      default="gemini")
-    gemini_api_key  = await db.get_system_setting("gemini_api_key",      default="")
-    claude_api_key  = await db.get_system_setting("claude_api_key",      default="")
+    channel_map          = await db.get_system_setting("channel_map",           default={})
+    admin_role_name      = await db.get_system_setting("admin_role_name",       default="GM")
+    session_ttl          = await db.get_system_setting("session_ttl_seconds",   default=3600)
+    gemini_model         = await db.get_system_setting("gemini_model",          default="gemini-1.5-pro")
+    ollama_model         = await db.get_system_setting("ollama_model",          default="mistral:7b-instruct")
+    claude_model         = await db.get_system_setting("claude_model",          default="claude-sonnet-4-6")
+    cloud_provider       = await db.get_system_setting("cloud_provider",        default="gemini")
+    adjudication_provider = await db.get_system_setting("adjudication_provider", default="ollama")
+    gemini_api_key       = await db.get_system_setting("gemini_api_key",        default="")
+    claude_api_key       = await db.get_system_setting("claude_api_key",        default="")
+    # SillyTavern — external, not part of the stack install
+    sillytavern_url      = await db.get_system_setting("sillytavern_url",       default="")
+    sillytavern_model    = await db.get_system_setting("sillytavern_model",     default="")
+    sillytavern_api_key  = await db.get_system_setting("sillytavern_api_key",   default="")
     return _tmpl(request).TemplateResponse("settings.html", {
-        "request":          request,
-        "page":             "settings",
-        "channel_map":      channel_map or {},
-        "admin_role_name":  admin_role_name or "GM",
-        "session_ttl":      session_ttl or 3600,
-        "gemini_model":     gemini_model or "gemini-1.5-pro",
-        "ollama_model":     ollama_model or "mistral:7b-instruct",
-        "claude_model":     claude_model or "claude-sonnet-4-6",
-        "cloud_provider":   cloud_provider or "gemini",
-        "gemini_api_key_set": bool(gemini_api_key),
-        "claude_api_key_set": bool(claude_api_key),
+        "request":               request,
+        "page":                  "settings",
+        "channel_map":           channel_map or {},
+        "admin_role_name":       admin_role_name or "GM",
+        "session_ttl":           session_ttl or 3600,
+        "gemini_model":          gemini_model or "gemini-1.5-pro",
+        "ollama_model":          ollama_model or "mistral:7b-instruct",
+        "claude_model":          claude_model or "claude-sonnet-4-6",
+        "cloud_provider":        cloud_provider or "gemini",
+        "adjudication_provider": adjudication_provider or "ollama",
+        "gemini_api_key_set":    bool(gemini_api_key),
+        "claude_api_key_set":    bool(claude_api_key),
+        # SillyTavern
+        "sillytavern_url":        sillytavern_url or "",
+        "sillytavern_model":      sillytavern_model or "",
+        "sillytavern_api_key_set": bool(sillytavern_api_key),
+        "sillytavern_connected":   bool(sillytavern_url),
         "flash_ok":  request.session.pop("flash_ok",  ""),
         "flash_err": request.session.pop("flash_err", ""),
     })
@@ -519,31 +530,47 @@ async def settings_page(request: Request):
 
 @router.post("/settings/general", response_class=RedirectResponse)
 async def settings_general_save(
-    request:         Request,
-    admin_role_name: str = Form("GM"),
-    session_ttl:     int = Form(3600),
-    gemini_model:    str = Form("gemini-1.5-pro"),
-    ollama_model:    str = Form("mistral:7b-instruct"),
-    claude_model:    str = Form("claude-sonnet-4-6"),
-    cloud_provider:  str = Form("gemini"),
-    gemini_api_key:  str = Form(""),
-    claude_api_key:  str = Form(""),
+    request:               Request,
+    admin_role_name:       str = Form("GM"),
+    session_ttl:           int = Form(3600),
+    gemini_model:          str = Form("gemini-1.5-pro"),
+    ollama_model:          str = Form("mistral:7b-instruct"),
+    claude_model:          str = Form("claude-sonnet-4-6"),
+    cloud_provider:        str = Form("gemini"),
+    adjudication_provider: str = Form("ollama"),
+    gemini_api_key:        str = Form(""),
+    claude_api_key:        str = Form(""),
+    # SillyTavern fields — all optional, not part of the install
+    sillytavern_url:       str = Form(""),
+    sillytavern_model:     str = Form(""),
+    sillytavern_api_key:   str = Form(""),
 ):
     db = _db(request)
+    _VALID_CLOUD    = {"gemini", "claude", "sillytavern"}
+    _VALID_ADJ      = {"ollama", "groq", "openrouter", "together", "sillytavern"}
     try:
         await db.set_system_setting("admin_role_name",     admin_role_name.strip() or "GM")
         await db.set_system_setting("session_ttl_seconds", max(60, session_ttl))
         await db.set_system_setting("gemini_model",        gemini_model.strip() or "gemini-1.5-pro")
         await db.set_system_setting("ollama_model",        ollama_model.strip() or "mistral:7b-instruct")
         await db.set_system_setting("claude_model",        claude_model.strip() or "claude-sonnet-4-6")
-        if cloud_provider in ("gemini", "claude"):
+        if cloud_provider in _VALID_CLOUD:
             await db.set_system_setting("cloud_provider", cloud_provider)
+        if adjudication_provider in _VALID_ADJ:
+            await db.set_system_setting("adjudication_provider", adjudication_provider)
         # Only update API keys if the field is non-empty (blank = keep existing)
         if gemini_api_key.strip():
             await db.set_system_setting("gemini_api_key", gemini_api_key.strip())
         if claude_api_key.strip():
             await db.set_system_setting("claude_api_key", claude_api_key.strip())
-        request.session["flash_ok"] = "Settings saved. API key changes take effect after restart."
+
+        # SillyTavern — save unconditionally (blank URL = disabled)
+        await db.set_system_setting("sillytavern_url",   sillytavern_url.strip())
+        await db.set_system_setting("sillytavern_model", sillytavern_model.strip())
+        if sillytavern_api_key.strip():
+            await db.set_system_setting("sillytavern_api_key", sillytavern_api_key.strip())
+
+        request.session["flash_ok"] = "Settings saved. API key and URL changes take effect after restart."
     except Exception as exc:
         logger.exception("Settings save failed: %s", exc)
         request.session["flash_err"] = str(exc)

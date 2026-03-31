@@ -61,6 +61,8 @@ _TASK_ROLE_MAP: dict[str, str] = {
     "combat_flavour":            _ACTOR_ROLE,
     "environmental_description": _SCRIBE_ROLE,
     "item_description":          _SCRIBE_ROLE,
+    "sound_director":            _SCRIBE_ROLE,
+    "scene_describer":           _SCRIBE_ROLE,
 }
 
 

@@ -67,6 +67,38 @@ class Settings(BaseSettings):
     # DuckDuckGo Instant Answers (no key required).
     serpapi_key: str = ""
 
+    # ── Multimedia ────────────────────────────────────────────────────────────
+    # ElevenLabs: SFX generation + optional TTS provider
+    elevenlabs_api_key: str = ""
+    # ComfyUI: local image generation (runs as a separate Docker service)
+    comfyui_url: str = "http://comfyui:8188"
+    # Stability AI: cloud image generation alternative
+    stability_ai_key: str = ""
+
+    # ── Cloud Adjudication (OpenAI-compatible providers) ──────────────────────
+    # adjudication_provider is managed at runtime via system_settings in the DB.
+    # Set these API keys here; switch the active provider via White Portal → Settings.
+    groq_api_key:       str = ""
+    groq_model:         str = "llama-3.3-70b-versatile"
+    openrouter_api_key: str = ""
+    openrouter_model:   str = "meta-llama/llama-3.3-70b-instruct"
+    together_api_key:   str = ""
+    together_model:     str = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+
+    # ── OpenAI (DALL-E 3 image gen + TTS alternative) ─────────────────────────
+    openai_api_key:   str = ""
+    openai_tts_model: str = "tts-1"
+    openai_tts_voice: str = "onyx"
+
+    # ── SillyTavern (external OpenAI-compatible frontend proxy) ───────────────
+    # SillyTavern is NOT installed as part of this stack.
+    # Point sillytavern_url at an existing SillyTavern instance.
+    # Typical endpoint: http://<host>:8000/api/openai/v1
+    # Leave empty to disable.  No API key required by default.
+    sillytavern_url:      str = ""   # base URL including /api/openai/v1
+    sillytavern_model:    str = ""   # optional model hint; leave blank to use ST's active model
+    sillytavern_api_key:  str = ""   # optional — only if ST has API key protection enabled
+
     # ── Aetheris Storage Paths (TDR §2) ──────────────────────────────────────
     # Root data directory — shared volume mounted at /app/data
     world_data_dir: str = "/app/data"

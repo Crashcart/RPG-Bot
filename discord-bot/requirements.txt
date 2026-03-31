@@ -1,2 +1,4 @@
 discord.py==2.4.0
 httpx==0.28.0
+edge-tts>=6.1.9
+wavelink>=3.4.0
