@@ -26,10 +26,10 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 from typing import Any
 
 from orchestrator.config import Settings
+from orchestrator.schemas.payloads import CoordinateUpdatePayload, FogRevealPayload
 from orchestrator.services.cache import CacheService
 from orchestrator.services.nats_bus import NATSBus
 
@@ -87,17 +87,24 @@ class FogOfWarService:
 
         await self._save_revealed(campaign_id, revealed)
 
-        # Notify map-renderer via NATS
-        await self._nats.publish_coordinate_update(
-            campaign_id, entity_id, cx, cy, token, reveal_radius
+        # Notify map-renderer via NATS (using validated Pydantic payload)
+        nats_payload = CoordinateUpdatePayload(
+            campaign_id=campaign_id,
+            entity_id=entity_id,
+            x=cx,
+            y=cy,
+            token=token,
+            reveal_radius=reveal_radius,
         )
+        await self._nats.publish_coordinate_update(campaign_id, nats_payload)
 
     async def reveal_cells(self, campaign_id: str, cells: list[int]) -> None:
         """Reveal an explicit list of flat grid-cell indices."""
         revealed = await self._load_revealed(campaign_id)
         revealed.update(cells)
         await self._save_revealed(campaign_id, revealed)
-        await self._nats.publish_fog_reveal(campaign_id, cells)
+        nats_payload = FogRevealPayload(campaign_id=campaign_id, cells=cells)
+        await self._nats.publish_fog_reveal(campaign_id, nats_payload)
 
     async def reset_map(self, campaign_id: str) -> None:
         """Clear all Fog-of-War and entity positions for a campaign."""

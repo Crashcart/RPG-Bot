@@ -252,6 +252,7 @@ async def lifespan(app: FastAPI):
         logger.info("NATS bus and FogOfWarService initialised.")
     except Exception as exc:
         logger.warning("NATS unavailable — map features disabled: %s", exc)
+        fog_of_war = None
 
     # ── System Integrity Check (TDR §1) ──────────────────────────────────────
     # Inject cache reference now that cache is connected.

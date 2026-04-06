@@ -166,68 +166,37 @@ async function renderAndCache(campaignId) {
 }
 
 // ── NATS message handlers ─────────────────────────────────────────────────────
+//
+// FogOfWarService (Python) writes all state to Redis _before_ publishing the
+// NATS event. The renderer's job is to read that state and re-render the PNG.
+// There is no duplication of position/FoW writes here.
 
 /**
  * Handle `map.update.<campaign_id>`.
- * Payload: { player_id, x, y, token?, reveal_radius? }
+ * FogOfWarService has already updated map:pos:* and fow:* in Redis.
+ * We simply re-render the canvas from the current Redis state.
  */
-async function handleUpdate(campaignId, payload) {
-  const { player_id, x, y, token = "", reveal_radius = 3 } = payload;
-
-  // Clamp coordinates to grid bounds
-  const cx = Math.max(0, Math.min(MAP_COLS - 1, Math.round(x)));
-  const cy = Math.max(0, Math.min(MAP_ROWS - 1, Math.round(y)));
-
-  // Persist player position
-  await redis.set(
-    `map:pos:${campaignId}:${player_id}`,
-    JSON.stringify({ x: cx, y: cy, token }),
-  );
-
-  // Reveal cells within radius
-  const fowRaw   = await redis.get(`fow:${campaignId}`);
-  const revealed = fowRaw ? new Set(JSON.parse(fowRaw)) : new Set();
-
-  for (let dy = -reveal_radius; dy <= reveal_radius; dy++) {
-    for (let dx = -reveal_radius; dx <= reveal_radius; dx++) {
-      if (dx * dx + dy * dy > reveal_radius * reveal_radius) continue;
-      const nx = cx + dx;
-      const ny = cy + dy;
-      if (nx >= 0 && nx < MAP_COLS && ny >= 0 && ny < MAP_ROWS) {
-        revealed.add(ny * MAP_COLS + nx);
-      }
-    }
-  }
-
-  await redis.set(`fow:${campaignId}`, JSON.stringify([...revealed]));
+async function handleUpdate(campaignId, _payload) {
   await renderAndCache(campaignId);
-  console.log(`[map-renderer] Updated map for campaign ${campaignId} (player=${player_id}, pos=${cx},${cy})`);
+  console.log(`[map-renderer] Re-rendered map for campaign ${campaignId} (position update)`);
 }
 
 /**
  * Handle `map.reveal.<campaign_id>`.
- * Payload: { cells: number[] }  (flat grid indices)
+ * FogOfWarService has already updated fow:* in Redis.
  */
-async function handleReveal(campaignId, payload) {
-  const { cells = [] } = payload;
-
-  const fowRaw   = await redis.get(`fow:${campaignId}`);
-  const revealed = fowRaw ? new Set(JSON.parse(fowRaw)) : new Set();
-  cells.forEach((idx) => revealed.add(idx));
-
-  await redis.set(`fow:${campaignId}`, JSON.stringify([...revealed]));
+async function handleReveal(campaignId, _payload) {
   await renderAndCache(campaignId);
-  console.log(`[map-renderer] Revealed ${cells.length} cells for campaign ${campaignId}`);
+  console.log(`[map-renderer] Re-rendered map for campaign ${campaignId} (fog reveal)`);
 }
 
 /**
  * Handle `map.reset.<campaign_id>`.
- * Clears FoW and all player positions for a campaign.
+ * FogOfWarService has already deleted fow:* and map:pos:* from Redis.
  */
 async function handleReset(campaignId) {
-  await redis.del(`fow:${campaignId}`);
-  const posKeys = await scanKeys(`map:pos:${campaignId}:*`);
-  if (posKeys.length) await redis.del(...posKeys);
+  // Clear any cached PNG so the next GET triggers a fresh (empty) render
+  await redis.del(`map:png:${campaignId}`);
   await renderAndCache(campaignId);
   console.log(`[map-renderer] Reset map for campaign ${campaignId}`);
 }

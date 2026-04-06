@@ -24,6 +24,7 @@ from nats.aio.client import Client as NATSClient
 from nats.aio.subscription import Subscription
 
 from orchestrator.config import Settings
+from orchestrator.schemas.payloads import CoordinateUpdatePayload, FogRevealPayload
 
 logger = logging.getLogger(__name__)
 
@@ -84,31 +85,18 @@ class NATSBus:
     async def publish_coordinate_update(
         self,
         campaign_id: str,
-        player_id: str,
-        x: int,
-        y: int,
-        token: str = "",
-        reveal_radius: int = 3,
+        payload: CoordinateUpdatePayload,
     ) -> None:
-        """Publish a player-coordinate update to the map renderer."""
-        await self.publish(
-            f"map.update.{campaign_id}",
-            {
-                "player_id":     player_id,
-                "x":             x,
-                "y":             y,
-                "token":         token,
-                "reveal_radius": reveal_radius,
-            },
-        )
+        """Publish a validated CoordinateUpdatePayload to the map renderer."""
+        await self.publish(f"map.update.{campaign_id}", payload.model_dump())
 
     async def publish_fog_reveal(
         self,
         campaign_id: str,
-        cells: list[int],
+        payload: FogRevealPayload,
     ) -> None:
         """Reveal an explicit set of grid-cell indices for a campaign."""
-        await self.publish(f"map.reveal.{campaign_id}", {"cells": cells})
+        await self.publish(f"map.reveal.{campaign_id}", payload.model_dump())
 
     async def publish_map_reset(self, campaign_id: str) -> None:
         """Reset the Fog-of-War and all token positions for a campaign."""
