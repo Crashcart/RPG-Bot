@@ -840,3 +840,140 @@ class GMDirective(BaseModel):
     status:          str  = "pending"    # pending | consumed | cancelled
     submitted_at:    datetime
     consumed_at:     datetime | None = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ABES – Autonomous Background Entity Simulation Schemas
+# ─────────────────────────────────────────────────────────────────────────────
+
+class NpcIntentType(str, Enum):
+    IDLE    = "idle"
+    TRAVEL  = "travel"
+    TRADE   = "trade"
+    CRAFT   = "craft"
+    FORAGE  = "forage"
+    PATROL  = "patrol"
+    SIEGE   = "siege"
+    RECRUIT = "recruit"
+    REST    = "rest"
+    CUSTOM  = "custom"
+
+
+class NpcEntityType(str, Enum):
+    NPC      = "npc"
+    FACTION  = "faction"
+    CREATURE = "creature"
+    VEHICLE  = "vehicle"
+
+
+class WorldDeltaSignificance(str, Enum):
+    MINOR    = "minor"
+    MAJOR    = "major"
+    CRITICAL = "critical"
+
+
+class NpcEntityRequest(BaseModel):
+    """
+    Register or update an NPC/faction entity so the ABES engine will advance
+    it autonomously during world ticks.
+    """
+    campaign_id:         str            = Field(..., description="Campaign UUID")
+    name:                str            = Field(..., max_length=120)
+    entity_type:         NpcEntityType  = Field(default=NpcEntityType.NPC)
+    current_location:    str            = Field(default="", max_length=200)
+    destination:         str            = Field(default="", max_length=200)
+    intent_type:         NpcIntentType  = Field(default=NpcIntentType.IDLE)
+    intent_description:  str            = Field(default="", max_length=500)
+    stats:               dict[str, Any] = Field(
+        default_factory=dict,
+        description="System-agnostic stats: hp, max_hp, speed, morale, etc.",
+    )
+    tick_interval_hours: int            = Field(
+        default=1,
+        ge=1,
+        le=168,
+        description="How many real-world hours between world ticks for this entity.",
+    )
+
+
+class NpcEntityStatus(BaseModel):
+    """Current simulation status of a registered NPC entity."""
+    entity_id:           str
+    campaign_id:         str
+    name:                str
+    entity_type:         str
+    current_location:    str
+    destination:         str
+    intent_type:         str
+    intent_description:  str
+    stats:               dict[str, Any]
+    active:              bool
+    tick_interval_hours: int
+    last_ticked_at:      datetime | None = None
+    next_tick_at:        datetime
+
+
+class WorldDeltaEntry(BaseModel):
+    """
+    A single world-delta event emitted by the ABES engine.
+    The RAG system uses these entries to generate catch-up rumours when a
+    player reconnects after being offline.
+    """
+    delta_id:        str
+    campaign_id:     str
+    entity_id:       str | None = None
+    entity_name:     str | None = None
+    event_type:      str
+    summary:         str
+    mechanical_data: dict[str, Any] = Field(default_factory=dict)
+    significance:    WorldDeltaSignificance
+    flagged:         bool = False
+    occurred_at:     datetime
+    notified:        bool = False
+
+
+class AbsTickResult(BaseModel):
+    """
+    Summary returned after a full ABES world-tick pass for a campaign.
+    """
+    campaign_id:       str
+    entities_ticked:   int  = 0
+    events_generated:  int  = 0
+    critical_events:   int  = 0
+    webhooks_fired:    int  = 0
+    tick_completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class OfflineOrderRequest(BaseModel):
+    """
+    A player submits offline orders for their character or a companion before
+    logging off.  The ABES engine resolves the task mathematically on the
+    next world tick and writes the result to world_delta as a player-facing
+    narrative fragment.
+    """
+    campaign_id:         str           = Field(..., description="Campaign UUID")
+    player_id:           str           = Field(..., description="Discord user snowflake")
+    character_name:      str           = Field(default="", max_length=120)
+    order_description:   str           = Field(
+        ...,
+        max_length=500,
+        description="What the character should do while offline (craft, forage, guard, etc.).",
+    )
+    duration_hours:      int           = Field(default=8, ge=1, le=168)
+    intent_type:         NpcIntentType = Field(default=NpcIntentType.CUSTOM)
+
+
+class OfflineOrderStatus(BaseModel):
+    """Status of a submitted offline order."""
+    order_id:          str
+    campaign_id:       str
+    player_id:         str
+    character_name:    str
+    order_description: str
+    intent_type:       str
+    duration_hours:    int
+    status:            str     # 'pending' | 'resolving' | 'complete' | 'failed'
+    result_summary:    str     = ""
+    submitted_at:      datetime
+    resolves_at:       datetime
+    resolved_at:       datetime | None = None
