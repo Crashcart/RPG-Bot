@@ -12,6 +12,7 @@ FastAPI application that drives the four-phase pipeline:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -40,8 +41,11 @@ from orchestrator.schemas.payloads import (
     DirectiveType,
     DowntimeSubmitRequest,
     DowntimeTaskStatus,
+    EpistemicBoundary,
     GMDirective,
     GMDirectiveRequest,
+    HiveMindCombatRequest,
+    HiveMindCombatResult,
     IntentPayload,
     NarrativeResponsePayload,
     PipelineResult,
@@ -50,9 +54,12 @@ from orchestrator.schemas.payloads import (
     RecapResponse,
     RetconRequest,
     RetconResponse,
+    SceneStateVector,
+    VibeStream,
 )
 from orchestrator.services import (
     AdminBackchannelService,
+    AgentSyncBus,
     AuthService,
     CacheService,
     CampfireService,
@@ -117,6 +124,12 @@ faction_svc = FactionService(db, gemini)
 # ── Tier 2: Sub-Agent Dispatcher ─────────────────────────────────────────────
 # Routes delegation tasks from the GM Director to actor/scribe Ollama nodes.
 sub_agent_dispatcher = SubAgentDispatcher(node_router)
+
+# ── Agent Sync Bus (Multi-Agent Vector-Space Communication, TDR §2) ───────────
+# Compresses scene state into SceneStateVectors, enforces epistemic boundaries,
+# and broadcasts filtered NPCSyncContext payloads to NPC agents in parallel.
+# Cache reference is bound in lifespan after cache.connect().
+agent_sync_bus = AgentSyncBus(node_router=node_router, cache=None)
 
 # ── Telemetry Service (no pool dependency — initialised immediately) ──────────
 # Must be created before GMDirector so it can be injected.
@@ -235,6 +248,7 @@ async def lifespan(app: FastAPI):
     # ── System Integrity Check (TDR §1) ──────────────────────────────────────
     # Inject cache reference now that cache is connected.
     sic._cache = cache
+    agent_sync_bus._cache = cache
     sic_result = await sic.run()
     if sic_result.status == "critical":
         failed = [p for p in sic_result.pillars if not p.passed and p.critical]
@@ -824,6 +838,128 @@ async def api_cancel_directive(directive_id: str) -> dict:
         raise HTTPException(status_code=503, detail="Backchannel service not initialised.")
     await backchannel.cancel_directive(directive_id)
     return {"status": "ok", "directive_id": directive_id}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent Sync Bus API  (Multi-Agent Vector-Space NPC/GM Sync, TDR §2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _NPCSyncRequest(SceneStateVector):
+    """
+    Request body for POST /api/npc/sync.
+
+    Extends SceneStateVector with an optional list of per-NPC epistemic
+    boundaries.  When boundaries is empty, all NPCs in active_npcs receive
+    the full (non-secret) scene state.
+    """
+    boundaries: list[EpistemicBoundary] = []
+
+
+@app.post(
+    "/api/npc/sync",
+    summary="Broadcast a scene state vector to active NPC agents (TDR §2)",
+    response_model=list[dict],
+)
+async def api_npc_sync(req: _NPCSyncRequest) -> list[dict]:
+    """
+    Compress the provided scene state and broadcast filtered NPCSyncContext
+    payloads to all active NPC agents in one parallel fan-out.
+
+    Returns one NPCSyncContext dict per NPC, in the same order as the
+    boundaries list (or one entry per active_npc when no boundaries are set).
+
+    Epistemic boundaries are enforced automatically — each NPC receives only
+    the information it is allowed to see per TDR §3.
+    """
+    # Build boundaries for any NPC that was not explicitly configured
+    boundaries = list(req.boundaries)
+    configured_ids = {b.npc_id for b in boundaries}
+    for npc_id in req.active_npcs:
+        if npc_id not in configured_ids:
+            boundaries.append(
+                EpistemicBoundary(npc_id=npc_id, npc_name=npc_id)
+            )
+
+    # Cast request to SceneStateVector (drop the extra field)
+    vector = SceneStateVector(**req.model_dump(exclude={"boundaries"}))
+    contexts = await agent_sync_bus.broadcast(vector, boundaries)
+
+    # Also update the campaign vibe stream
+    asyncio.create_task(
+        agent_sync_bus.update_vibe(
+            campaign_id=req.campaign_id,
+            vibe_key=req.vibe_key,
+            source="auto",
+        )
+    )
+
+    return [ctx.model_dump() for ctx in contexts]
+
+
+@app.post(
+    "/api/npc/hive-mind-combat",
+    summary="Parallel hive-mind NPC combat resolution (TDR §3 Option 2)",
+    response_model=HiveMindCombatResult,
+)
+async def api_hive_mind_combat(req: HiveMindCombatRequest) -> HiveMindCombatResult:
+    """
+    Activate all listed NPC agents simultaneously for parallel combat turn
+    resolution.  Each NPC calculates its move concurrently; the GM layer
+    resolves targeting conflicts.  NPCs that miss the deadline are assigned
+    a default hold-position action.
+    """
+    # Retrieve the last cached scene vector for this campaign
+    vector_raw = None
+    if cache:
+        try:
+            key = f"ironclad:scene_vector:{req.campaign_id}"
+            vector_raw = await cache.get(key)
+        except Exception:
+            pass
+
+    if not vector_raw:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "No active scene vector found for this campaign. "
+                "Trigger /api/npc/sync first to compress the current scene state."
+            ),
+        )
+
+    import json as _json
+    vector_data = _json.loads(vector_raw)
+    vector = SceneStateVector(**vector_data)
+
+    boundaries = [
+        EpistemicBoundary(npc_id=nid, npc_name=nid) for nid in req.npc_ids
+    ]
+
+    return await agent_sync_bus.resolve_hive_mind_combat(req, boundaries, vector)
+
+
+@app.get(
+    "/api/npc/vibe/{campaign_id}",
+    summary="Get the current atmosphere vibe stream for a campaign (TDR §3 Option 3)",
+    response_model=dict,
+)
+async def api_npc_vibe(campaign_id: str) -> dict:
+    """
+    Return the current low-dimensional atmosphere vibe for a campaign.
+
+    The VibeStream is updated automatically after every player action and
+    after every /api/npc/sync call.  NPC dialogue prompts are prefixed with
+    this vibe so they adapt their tone without explicit GM instructions on
+    every line.
+    """
+    vibe = await agent_sync_bus.get_vibe(campaign_id)
+    if vibe is None:
+        return VibeStream(
+            campaign_id=campaign_id,
+            vibe_key="neutral",
+            intensity=5,
+            source="default",
+        ).model_dump()
+    return vibe.model_dump()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
