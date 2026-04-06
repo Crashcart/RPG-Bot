@@ -204,12 +204,14 @@ class AgentSyncBus:
         """
         allowed_codes_set = set(boundary.allowed_codes)
 
-        # Filter peer NPC emotion states: only include codes the NPC is allowed to see
+        # Filter peer NPC emotion states: only include codes the NPC is allowed to see.
+        # An empty allowed_codes list means "receive all non-secret codes".
         visible_emotions: list[tuple[str, EmotionHashPayload]] = []
         for (peer_id, emotion) in vector.npc_emotions:
             if peer_id == boundary.npc_id:
                 continue  # exclude self
-            if allowed_codes_set and emotion.code not in allowed_codes_set:
+            # Only apply code filtering when a non-empty allowed list is configured
+            if len(allowed_codes_set) > 0 and emotion.code not in allowed_codes_set:
                 continue  # not in this NPC's allowed perception set
             visible_emotions.append((peer_id, emotion))
 

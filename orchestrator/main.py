@@ -926,8 +926,7 @@ async def api_hive_mind_combat(req: HiveMindCombatRequest) -> HiveMindCombatResu
             ),
         )
 
-    import json as _json
-    vector_data = _json.loads(vector_raw)
+    vector_data = json.loads(vector_raw)
     vector = SceneStateVector(**vector_data)
 
     boundaries = [
