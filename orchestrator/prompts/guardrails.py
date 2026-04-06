@@ -49,13 +49,34 @@ skill.  Station assignment (AssignedCharacter) is changed via
 subsystem_deltas, NOT via stat_deltas.  Hull damage is negative hull_delta.
 If a subsystem is destroyed, set new_status = "DESTROYED".
 
+6. STEALTH RULES — When action_category is "stealth":
+   a. Identify the relevant Stealth / Dexterity stat from the character sheet.
+   b. Set the Detection DC to the highest nearby NPC's Passive Perception
+      (10 + Perception modifier) found in the rulebook context, or 12 if
+      not specified.
+   c. Roll the Stealth check using the notation from dice_request (e.g. 1d20).
+      Apply the character's Stealth modifier. Compare to the Detection DC.
+   d. Set is_detected = false when roll_result > Detection DC (character
+      remains hidden). Set is_detected = true when roll_result ≤ Detection DC
+      (character is spotted).
+   e. On CRITICAL SUCCESS (natural 20 or system equivalent): is_detected =
+      false; grant advantage on the character's next action by noting it in
+      reasoning.
+   f. On CRITICAL FAILURE (natural 1 or system equivalent): is_detected =
+      true; apply a SURPRISED penalty to the character's next action by
+      noting it in reasoning.
+   g. Never reveal is_detected value to the player through the reasoning
+      field — the field is mechanical metadata, not player-facing output.
+
 OUTPUT FORMAT — You must respond with ONLY valid JSON matching this schema:
 {
   "action_type": "<string>",
+  "action_category": "<combat|stealth|skill_check|saving_throw|social|exploration|unknown>",
   "difficulty": <integer>,
   "dice_request": {"notation": "<string>", "modifier": <int>, "purpose": "<string>"},
   "roll_result": <integer>,
   "outcome": "<critical_success|success|partial_success|failure|critical_failure>",
+  "is_detected": <boolean — stealth only; false = hidden, true = spotted>,
   "state_delta": {
     "character_id": "<uuid>",
     "stat_deltas": [{"stat_key": "<key>", "old_value": <any>, "new_value": <any>}],
@@ -134,6 +155,14 @@ unambiguously describe the character's death. No ambiguity. No survival left ope
 You MUST NOT write what the player character thinks, feels, says, or decides to do. \
 Write NPC actions, environment changes, and mechanical consequences. \
 End every response leaving the player an open choice. Hand agency back.
+
+7. STEALTH PROHIBITION — When is_hidden is true in the Mechanical Truth, \
+you MUST narrate only the character's own sensory experience (what they \
+see, hear, smell) and the physical result of their movement. \
+You MUST NOT describe what NPCs see, fail to see, or suspect. \
+Never reference detection, awareness checks, or passive perception. \
+When is_detected is true (character is spotted), narrate only the NPC's \
+startled reaction — never cite a dice roll, a number, or any game mechanic.
 
 Begin your response immediately with the narrative prose. No preamble.
 """
@@ -217,6 +246,14 @@ No possibility of survival left open.
 You MUST NOT write what the player character thinks, feels, says, or decides to do. \
 Write NPC actions, environment changes, and mechanical consequences. \
 End every response leaving the player an open choice. Hand agency back.
+
+7. STEALTH PROHIBITION — When is_hidden is true in the Mechanical Truth, \
+you MUST narrate only the character's own sensory experience (what they \
+see, hear, smell) and the physical result of their movement. \
+You MUST NOT describe what NPCs see, fail to see, or suspect. \
+Never reference detection, awareness checks, or passive perception. \
+When is_detected is true (character is spotted), narrate only the NPC's \
+startled reaction — never cite a dice roll, a number, or any game mechanic.
 
 Begin your response immediately with the narrative prose. No preamble.
 """

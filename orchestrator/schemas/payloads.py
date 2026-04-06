@@ -59,6 +59,21 @@ class OperationalStatus(str, Enum):
     DESTROYED   = "DESTROYED"
 
 
+class ActionCategory(str, Enum):
+    """
+    Pre-classified intent category produced by the ingestion phase.
+    Drives the mechanical engine's resolution path without the LLM
+    having to parse free-form text — keeping the dice maths deterministic.
+    """
+    COMBAT       = "combat"
+    STEALTH      = "stealth"
+    SKILL_CHECK  = "skill_check"
+    SAVING_THROW = "saving_throw"
+    SOCIAL       = "social"
+    EXPLORATION  = "exploration"
+    UNKNOWN      = "unknown"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 1 – Ingestion Schema: Discord → Orchestrator
 # ─────────────────────────────────────────────────────────────────────────────
@@ -168,6 +183,14 @@ class ContextAssemblyPayload(BaseModel):
             "prevent context-window overflow."
         ),
     )
+    action_category:    ActionCategory = Field(
+        default=ActionCategory.UNKNOWN,
+        description=(
+            "Intent category classified in Phase 1 by keyword analysis. "
+            "Narrows the mechanical engine's resolution path: stealth → "
+            "detection check, combat → attack/damage roll, etc."
+        ),
+    )
     assembled_at:       datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -246,6 +269,10 @@ class OllamaResolutionPayload(BaseModel):
     resolution_id:      str  = Field(default_factory=lambda: str(uuid.uuid4()))
     intent_id:          str
     action_type:        str  = Field(..., description="e.g. 'melee_attack', 'skill_check', 'saving_throw'")
+    action_category:    ActionCategory = Field(
+        default=ActionCategory.UNKNOWN,
+        description="Resolved intent category — echoed from context for downstream routing.",
+    )
     difficulty:         int  = Field(..., ge=1, description="Target number / DC")
     dice_request:       DiceRequest
     roll_result:        int  = Field(..., description="Final total after modifiers")
@@ -255,6 +282,15 @@ class OllamaResolutionPayload(BaseModel):
     reasoning:          str        = Field(
         default="",
         description="Terse mechanical justification (no narrative flavor)",
+    )
+    # ── Stealth Resolution ────────────────────────────────────────────────────
+    is_detected:        bool = Field(
+        default=False,
+        description=(
+            "Stealth outcomes only. True when the character's Stealth roll "
+            "fails to beat the opposing Detection DC — the character is spotted. "
+            "False when the character remains hidden after this action."
+        ),
     )
     resolved_at:        datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -362,6 +398,7 @@ class MechanicalTruth(BaseModel):
     Gemini must not contradict any field here.
     """
     action_type:        str
+    action_category:    ActionCategory = ActionCategory.UNKNOWN
     difficulty:         int
     dice_notation:      str
     roll_result:        int
@@ -369,6 +406,15 @@ class MechanicalTruth(BaseModel):
     stat_changes:       list[StatDelta]
     status_change:      CharacterStatus | None
     rulebook_citations: list[str]
+    # ── Stealth ───────────────────────────────────────────────────────────────
+    is_hidden:          bool = Field(
+        default=False,
+        description=(
+            "Stealth outcomes only. True when the character successfully remains "
+            "undetected after this action. The narrator must NOT describe what "
+            "NPCs see or fail to see — narrate only the character's own experience."
+        ),
+    )
 
 
 class NarrativeRequestPayload(BaseModel):
