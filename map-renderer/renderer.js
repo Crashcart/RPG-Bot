@@ -60,6 +60,24 @@ const TOKEN_COLOURS = [
 ];
 
 /**
+ * Scan Redis keys matching a pattern without blocking.
+ * Uses HSCAN-style iteration via the SCAN command.
+ *
+ * @param {string} pattern
+ * @returns {Promise<string[]>}
+ */
+async function scanKeys(pattern) {
+  const keys = [];
+  let cursor = "0";
+  do {
+    const [nextCursor, batch] = await redis.scan(cursor, "MATCH", pattern, "COUNT", 100);
+    keys.push(...batch);
+    cursor = nextCursor;
+  } while (cursor !== "0");
+  return keys;
+}
+
+/**
  * Rebuild and persist the PNG for a single campaign.
  * Reads player positions and revealed FoW cells from Redis, draws the canvas,
  * and writes the PNG binary back to Redis.
@@ -111,7 +129,7 @@ async function renderAndCache(campaignId) {
   }
 
   // ── Player tokens ───────────────────────────────────────────────────────────
-  const posKeys = await redis.keys(`map:pos:${campaignId}:*`);
+  const posKeys = await scanKeys(`map:pos:${campaignId}:*`);
   let tokenIndex = 0;
 
   for (const key of posKeys) {
@@ -137,7 +155,9 @@ async function renderAndCache(campaignId) {
       }
 
       tokenIndex++;
-    } catch (_) { /* malformed pos — skip */ }
+    } catch (err) {
+      console.warn(`[map-renderer] Skipping malformed position key ${key}:`, err.message);
+    }
   }
 
   // ── Write PNG to Redis ───────────────────────────────────────────────────────
@@ -206,7 +226,7 @@ async function handleReveal(campaignId, payload) {
  */
 async function handleReset(campaignId) {
   await redis.del(`fow:${campaignId}`);
-  const posKeys = await redis.keys(`map:pos:${campaignId}:*`);
+  const posKeys = await scanKeys(`map:pos:${campaignId}:*`);
   if (posKeys.length) await redis.del(...posKeys);
   await renderAndCache(campaignId);
   console.log(`[map-renderer] Reset map for campaign ${campaignId}`);
@@ -274,7 +294,9 @@ const server = http.createServer(async (req, res) => {
       let payload = {};
       try {
         payload = JSON.parse(sc.decode(msg.data));
-      } catch (_) { /* empty payload for reset */ }
+      } catch (err) {
+        console.debug(`[map-renderer] Could not parse payload for ${subject}:`, err.message);
+      }
 
       try {
         if (verb === "update") await handleUpdate(campaignId, payload);

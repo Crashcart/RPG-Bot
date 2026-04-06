@@ -75,7 +75,7 @@ services:
       ironclad-chroma:
         condition: service_started
       aetheris-nats:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - ./data:/app/data          # shared global data (TDR §2)
       - ./logs:/app/logs          # structured logs
@@ -290,9 +290,11 @@ services:
     restart: unless-stopped
     networks:
       - aetheris_net
+    # Enable HTTP monitoring on port 8222 (internal) for the healthcheck.
+    command: ["--http_port", "8222"]
     # No external port mapping — scribe and map-renderer connect via internal network.
     healthcheck:
-      test: ["CMD-SHELL", "nats-server --ping 2>/dev/null || wget -qO- http://localhost:8222/healthz | grep -q ok"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz | grep -q ok"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -322,7 +324,7 @@ services:
       - MAP_ROWS=20
     depends_on:
       aetheris-nats:
-        condition: service_started
+        condition: service_healthy
       ironclad-cache:
         condition: service_healthy
     healthcheck:

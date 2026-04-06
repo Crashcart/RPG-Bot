@@ -102,7 +102,7 @@ class FogOfWarService:
     async def reset_map(self, campaign_id: str) -> None:
         """Clear all Fog-of-War and entity positions for a campaign."""
         await self._cache.client.delete(f"fow:{campaign_id}")
-        pos_keys = await self._cache.client.keys(f"map:pos:{campaign_id}:*")
+        pos_keys = await self._scan_keys(f"map:pos:{campaign_id}:*")
         if pos_keys:
             await self._cache.client.delete(*pos_keys)
         await self._cache.client.delete(f"map:png:{campaign_id}")
@@ -116,7 +116,7 @@ class FogOfWarService:
 
     async def get_positions(self, campaign_id: str) -> dict[str, dict[str, Any]]:
         """Return a mapping of entity_id → {x, y, token} for a campaign."""
-        keys = await self._cache.client.keys(f"map:pos:{campaign_id}:*")
+        keys = await self._scan_keys(f"map:pos:{campaign_id}:*")
         positions: dict[str, dict[str, Any]] = {}
         for key in keys:
             raw = await self._cache.client.get(key)
@@ -134,6 +134,17 @@ class FogOfWarService:
         return f"{self._settings.map_renderer_url}/map/{campaign_id}"
 
     # ── Private helpers ───────────────────────────────────────────────────────
+
+    async def _scan_keys(self, pattern: str) -> list[str]:
+        """Non-blocking key scan using SCAN instead of KEYS."""
+        keys: list[str] = []
+        cursor = 0
+        while True:
+            cursor, batch = await self._cache.client.scan(cursor, match=pattern, count=100)
+            keys.extend(batch)
+            if cursor == 0:
+                break
+        return keys
 
     async def _load_revealed(self, campaign_id: str) -> set[int]:
         raw = await self._cache.client.get(f"fow:{campaign_id}")

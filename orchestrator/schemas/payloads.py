@@ -18,7 +18,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -857,7 +857,7 @@ class CoordinateUpdatePayload(BaseModel):
     """
     campaign_id:    str = Field(..., description="Campaign UUID")
     entity_id:      str = Field(..., description="Discord user ID or NPC identifier")
-    entity_type:    str = Field(default="player", description="player | npc | object")
+    entity_type:    Literal["player", "npc", "object"] = Field(default="player")
     x:              int = Field(..., ge=0, description="Grid column (0-based)")
     y:              int = Field(..., ge=0, description="Grid row (0-based)")
     token:          str = Field(default="", description="1-2 char token label for the map")
