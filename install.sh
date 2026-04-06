@@ -108,6 +108,9 @@ set -a
 source .env 2>/dev/null || true
 set +a
 
+# Resolve PROJECT_PREFIX (must be done after sourcing .env)
+PROJECT_PREFIX="${PROJECT_PREFIX:-ironclad-gm}"
+
 # =============================================================================
 # Step 4: Build and start all services
 # =============================================================================
@@ -120,9 +123,9 @@ log "All services started"
 # =============================================================================
 info "Waiting for database to become healthy..."
 TIMEOUT=120; ELAPSED=0; INTERVAL=5
-until docker inspect --format='{{.State.Health.Status}}' aetheris-db 2>/dev/null | grep -q 'healthy'; do
+until docker inspect --format='{{.State.Health.Status}}' "${PROJECT_PREFIX}-db" 2>/dev/null | grep -q 'healthy'; do
     if [[ $ELAPSED -ge $TIMEOUT ]]; then
-        error "Database did not become healthy within ${TIMEOUT}s. Check: docker logs aetheris-db"
+        error "Database did not become healthy within ${TIMEOUT}s. Check: docker logs ${PROJECT_PREFIX}-db"
     fi
     sleep $INTERVAL
     ELAPSED=$((ELAPSED + INTERVAL))
@@ -149,7 +152,7 @@ if [[ -d "$MIGRATION_DIR" ]]; then
             echo "OK"
         else
             echo "FAILED"
-            error "Migration ${filename} failed. Check: docker logs aetheris-db"
+            error "Migration ${filename} failed. Check: docker logs ${PROJECT_PREFIX}-db"
         fi
     done
     log "All migrations applied"
@@ -177,9 +180,9 @@ echo -e "${GREEN}${BOLD}╔═════════════════�
 echo -e "${GREEN}${BOLD}║     ✓  Ironclad GM is running!                       ║${NC}"
 echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo "  Web Admin (White Portal):  http://localhost:8000/web/"
-echo "  Health Pulse:              http://localhost:58291/"
-echo "  Media Proxy:               http://localhost:8001/"
+echo "  Web Admin (White Portal):  http://localhost:${APP_HOST_PORT:-8000}/web/"
+echo "  Health Pulse:              http://localhost:${PULSE_HOST_PORT:-58291}/"
+echo "  Media Proxy:               http://localhost:${MEDIA_PROXY_HOST_PORT:-8001}/"
 echo ""
 echo "  Next steps:"
 echo "    1. Invite your Discord bot to your server"

@@ -1,0 +1,67 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Pre-Flight Validation  (TDR §2-B)
+#
+# Runs on every push and pull-request to validate:
+#   1. deploy.sh — ShellCheck static analysis
+#   2. install.sh / uninstall.sh — ShellCheck static analysis
+#   3. docker-compose.yml — syntax validation via `docker compose config`
+# ─────────────────────────────────────────────────────────────────────────────
+name: Pre-Flight Validation
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  shellcheck:
+    name: ShellCheck — shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: "."
+          severity: warning
+          # SC2086 — double-quote warnings handled case-by-case
+          # SC1091 — sourced files not present in CI
+          ignore_codes: "SC1091"
+
+  compose-validate:
+    name: Docker Compose — config validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create minimal .env for compose config
+        run: |
+          cat > .env <<'EOF'
+          PROJECT_PREFIX=ironclad-gm
+          APP_HOST_PORT=8000
+          MEDIA_PROXY_HOST_PORT=8001
+          PULSE_HOST_PORT=58291
+          POSTGRES_PASSWORD=ci_test_password
+          REDIS_PASSWORD=ci_test_redis
+          LAVALINK_PASSWORD=ci_test_lavalink
+          EOF
+
+      - name: Validate docker-compose.yml syntax
+        run: docker compose config --quiet
+
+  preflight-dry-run:
+    name: deploy.sh — dry-run flag parsing
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Make deploy.sh executable
+        run: chmod +x deploy.sh
+
+      - name: Verify deploy.sh is syntactically valid
+        run: bash -n deploy.sh
