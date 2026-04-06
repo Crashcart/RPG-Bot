@@ -80,6 +80,7 @@ from orchestrator.services import (
 from orchestrator.services.janitor          import JanitorService
 from orchestrator.services.paradox_engine   import ParadoxEngine
 from orchestrator.services.prophetic_buffer import PropheticBuffer
+from orchestrator.services.campaign_vault   import CampaignVault
 from orchestrator.services.reality_wall     import RealityWall
 from orchestrator.services.rolling_vault    import RollingVault
 from orchestrator.services.sic              import SystemIntegrityCheck
@@ -131,6 +132,10 @@ disk_agent = DiskAgentService(settings.world_data_dir)
 # ── Reality Wall (SQLite world-state + path isolation) ────────────────────────
 # TDR §2: vault DB at /app/data/vault/scribe_core.db
 reality_wall = RealityWall(data_dir=settings.world_data_dir, vault_dir=settings.vault_dir)
+
+# ── Campaign Vault (Multi-Tenant isolated SQLite per campaign) ─────────────────
+# TDR §2-3: each campaign gets campaign_<uuid>.db inside vault/campaigns/
+campaign_vault = CampaignVault(vault_dir=settings.vault_dir, data_dir=settings.world_data_dir)
 
 # ── Paradox Engine (unreliable narrator post-processor) ───────────────────────
 paradox_engine = ParadoxEngine()
@@ -227,6 +232,7 @@ async def lifespan(app: FastAPI):
     await story_memory.connect(db.pool)
     await node_router.start()   # begin background health-check loop
     await reality_wall.init()        # create SQLite schema + data dirs
+    await campaign_vault.init()      # create campaigns/ directory tree
     await world_registry.scan()      # discover all worlds in data/fonts/+templates/
     rolling_vault.bind(db.pool)      # Step 5: bind pool now that db.connect() is done
     await prophetic_buffer.start()
@@ -1380,3 +1386,177 @@ async def get_campaign_world(campaign_id: str) -> WorldSchema:
             detail=f"No world set for campaign {campaign_id}.",
         )
     return schema
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-Tenant Campaign Vault API  (TDR §2-3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@app.post(
+    "/api/campaigns/{campaign_id}/provision",
+    summary="Provision an isolated SQLite vault for a campaign",
+    tags=["campaign-vault"],
+    status_code=status.HTTP_201_CREATED,
+)
+async def provision_campaign_vault(
+    campaign_id: str,
+    req: dict = {},
+) -> dict:
+    """
+    Create an isolated SQLite database for *campaign_id* (must be a UUID v4).
+
+    Idempotent — safe to call on an already-provisioned campaign.
+    Optionally accepts ``{"name": str, "world": str}`` in the request body.
+
+    Raises 400 if *campaign_id* is not a valid UUID v4.
+    """
+    try:
+        db_path = await campaign_vault.provision(
+            campaign_id=campaign_id,
+            name=req.get("name", ""),
+            world=req.get("world", ""),
+            metadata=req.get("metadata", {}),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    # Mirror to PostgreSQL campaign_vaults table (best-effort — non-fatal if
+    # the table doesn't exist yet, e.g. during test runs without a full DB).
+    try:
+        await db.execute(
+            """
+            INSERT INTO campaign_vaults
+                (campaign_id, db_path, status, display_name, world, metadata)
+            VALUES ($1, $2, 'active', $3, $4, $5::jsonb)
+            ON CONFLICT (campaign_id) DO UPDATE
+                SET status         = 'active',
+                    display_name   = EXCLUDED.display_name,
+                    world          = EXCLUDED.world,
+                    last_active_at = NOW()
+            """,
+            campaign_id,
+            str(db_path),
+            req.get("name", ""),
+            req.get("world", ""),
+            json.dumps(req.get("metadata", {})),
+        )
+    except Exception as exc:
+        logger.warning("Campaign vault registry update skipped: %s", exc)
+
+    return {
+        "campaign_id": campaign_id,
+        "db_path":     str(db_path),
+        "provisioned": True,
+    }
+
+
+@app.get(
+    "/api/campaigns/vaults",
+    summary="List all provisioned campaign vaults",
+    tags=["campaign-vault"],
+)
+async def list_campaign_vaults() -> list[dict]:
+    """
+    Return metadata for every provisioned campaign vault discovered on disk.
+
+    Each entry contains campaign_id, db_path, size_bytes, provisioned_at,
+    name, and world.
+    """
+    return await campaign_vault.list_campaigns()
+
+
+@app.delete(
+    "/api/campaigns/{campaign_id}/vault",
+    summary="Permanently destroy a campaign's isolated SQLite vault",
+    tags=["campaign-vault"],
+)
+async def destroy_campaign_vault(campaign_id: str) -> dict:
+    """
+    Permanently delete the SQLite database file for *campaign_id*.
+
+    This action is irreversible.  The associated PostgreSQL row in
+    ``campaign_vaults`` is also marked as ``destroyed``.
+
+    Raises 400 if *campaign_id* is not a valid UUID v4.
+    Raises 404 if no vault exists for the given campaign.
+    """
+    try:
+        deleted = await campaign_vault.destroy(campaign_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No vault found for campaign {campaign_id}.",
+        )
+
+    try:
+        await db.execute(
+            "UPDATE campaign_vaults SET status = 'destroyed' WHERE campaign_id = $1",
+            campaign_id,
+        )
+    except Exception as exc:
+        logger.warning("Campaign vault registry destroy-update skipped: %s", exc)
+
+    return {"campaign_id": campaign_id, "destroyed": True}
+
+
+@app.get(
+    "/api/campaigns/{campaign_id}/export",
+    summary="Export a campaign vault snapshot (Multiverse Export Protocol)",
+    tags=["campaign-vault"],
+)
+async def export_campaign_vault(campaign_id: str) -> dict:
+    """
+    Serialise the entire per-campaign SQLite database to a portable JSON
+    snapshot.
+
+    The snapshot includes npc_memories, volatile_state, session_log, and
+    campaign_meta.  The caller may cryptographically sign it and inject it
+    into another campaign via the ``/api/campaigns/{id}/import`` endpoint.
+
+    Raises 400 if *campaign_id* is not a valid UUID v4.
+    Raises 404 if no vault exists for the given campaign.
+    """
+    try:
+        snapshot = await campaign_vault.export_snapshot(campaign_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+    return snapshot
+
+
+@app.post(
+    "/api/campaigns/{campaign_id}/import",
+    summary="Import a campaign vault snapshot into an existing vault",
+    tags=["campaign-vault"],
+)
+async def import_campaign_vault(campaign_id: str, req: dict) -> dict:
+    """
+    Import a portable snapshot produced by ``/api/campaigns/{id}/export``
+    into the vault for *campaign_id*.
+
+    Pass ``{"snapshot": {...}, "merge": false}`` in the request body.
+    When ``merge`` is ``true`` existing rows are kept and incoming rows are
+    appended; when ``false`` (default) npc_memories and volatile_state are
+    replaced before the import.
+
+    Raises 400 if *campaign_id* is not a valid UUID v4 or the snapshot is
+    from an unsupported schema version.
+    """
+    snapshot = req.get("snapshot")
+    if not snapshot:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="snapshot required")
+
+    merge = bool(req.get("merge", False))
+
+    try:
+        await campaign_vault.import_snapshot(campaign_id, snapshot, merge=merge)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    return {"campaign_id": campaign_id, "imported": True, "merge": merge}
