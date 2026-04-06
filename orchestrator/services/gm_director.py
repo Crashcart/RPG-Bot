@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     from orchestrator.services.gemini_client         import GeminiClient
     from orchestrator.services.handout_service       import HandoutService
     from orchestrator.services.image_gen             import ImageGenService
+    from orchestrator.services.immersion_middleware  import ImmersionMiddleware
     from orchestrator.services.node_router           import NodeRouter
     from orchestrator.services.paradox_engine        import ParadoxEngine
     from orchestrator.services.reality_wall          import RealityWall
@@ -144,6 +145,7 @@ class GMDirector:
         reality_wall:   "RealityWall | None" = None,
         paradox_engine: "ParadoxEngine | None" = None,
         world_registry: "WorldRegistry | None" = None,
+        immersion_middleware: "ImmersionMiddleware | None" = None,
         # ── Multimedia services (optional) ────────────────────────────────
         image_gen:      "ImageGenService | None" = None,
         elevenlabs:     "ElevenLabsClient | None" = None,
@@ -151,21 +153,22 @@ class GMDirector:
         faction_svc:    "FactionService | None" = None,
         db=None,
     ) -> None:
-        self._gemini         = gemini
-        self._claude         = claude
-        self._cloud_provider = cloud_provider
-        self._node_router    = node_router
-        self._dispatcher     = dispatcher
-        self._story_memory   = story_memory
-        self._telemetry      = telemetry
-        self._reality_wall   = reality_wall
-        self._paradox_engine = paradox_engine
-        self._world_registry = world_registry
-        self._image_gen      = image_gen
-        self._elevenlabs     = elevenlabs
-        self._handout_svc    = handout_svc
-        self._faction_svc    = faction_svc
-        self._db             = db
+        self._gemini               = gemini
+        self._claude               = claude
+        self._cloud_provider       = cloud_provider
+        self._node_router          = node_router
+        self._dispatcher           = dispatcher
+        self._story_memory         = story_memory
+        self._telemetry            = telemetry
+        self._reality_wall         = reality_wall
+        self._paradox_engine       = paradox_engine
+        self._world_registry       = world_registry
+        self._immersion_middleware = immersion_middleware
+        self._image_gen            = image_gen
+        self._elevenlabs           = elevenlabs
+        self._handout_svc          = handout_svc
+        self._faction_svc          = faction_svc
+        self._db                   = db
 
     # ── Public Interface ───────────────────────────────────────────────────────
 
@@ -356,7 +359,32 @@ class GMDirector:
                 stripped_count, storyteller_name,
             )
 
-        # ── Step 4e: Paradox Engine (unreliable narrator injection) ───────────
+        # ── Step 4e: Immersion Middleware (censorship reversion, list flattening,
+        #             final brand filter, and character-sheet UI gate) ──────────
+        render_character_sheet = False
+        if self._immersion_middleware:
+            try:
+                final_narrative, scrub_report = self._immersion_middleware.scrub_narrative(
+                    final_narrative
+                )
+                render_character_sheet = self._immersion_middleware.should_render_character_sheet(
+                    commit.pre_state, commit.post_state
+                )
+                if any(scrub_report.values()):
+                    logger.info(
+                        "ImmersionMiddleware scrub complete: %s",
+                        scrub_report,
+                    )
+                if self._telemetry:
+                    await self._telemetry.emit(
+                        "immersion_scrub",
+                        **scrub_report,
+                        render_character_sheet=render_character_sheet,
+                    )
+            except Exception as im_exc:
+                logger.debug("Immersion Middleware failed (non-fatal): %s", im_exc)
+
+        # ── Step 4f: Paradox Engine (unreliable narrator injection) ───────────
         if self._paradox_engine and self._reality_wall:
             try:
                 paradox_level = await self._reality_wall.get_paradox_level(campaign_id)
@@ -470,6 +498,7 @@ class GMDirector:
             tts_cues=tts_cues,
             channel_directive=channel_directive,
             driftnet_channel_id=driftnet_channel_id,
+            render_character_sheet=render_character_sheet,
             sfx_cues=sfx_cues,
             music_cue=music_cue,
             scene_image_prompt=scene_image_prompt,

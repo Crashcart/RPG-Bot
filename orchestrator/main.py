@@ -77,15 +77,16 @@ from orchestrator.services import (
     TelemetryService,
     WebSearchService,
 )
-from orchestrator.services.janitor          import JanitorService
-from orchestrator.services.paradox_engine   import ParadoxEngine
-from orchestrator.services.prophetic_buffer import PropheticBuffer
-from orchestrator.services.reality_wall     import RealityWall
-from orchestrator.services.rolling_vault    import RollingVault
-from orchestrator.services.sic              import SystemIntegrityCheck
-from orchestrator.services.world_registry   import WorldRegistry
-from orchestrator.services.pdf_processor    import PDFProcessorService
-from orchestrator.schemas.world_schema      import WorldSchema, WorldSwitchRequest, WorldSwitchResponse
+from orchestrator.services.janitor             import JanitorService
+from orchestrator.services.paradox_engine      import ParadoxEngine
+from orchestrator.services.prophetic_buffer    import PropheticBuffer
+from orchestrator.services.reality_wall        import RealityWall
+from orchestrator.services.rolling_vault       import RollingVault
+from orchestrator.services.sic                 import SystemIntegrityCheck
+from orchestrator.services.world_registry      import WorldRegistry
+from orchestrator.services.pdf_processor       import PDFProcessorService
+from orchestrator.services.immersion_middleware import ImmersionMiddleware
+from orchestrator.schemas.world_schema         import WorldSchema, WorldSwitchRequest, WorldSwitchResponse
 
 # ─────────────────────────────────────────────────────────────────────────────
 settings = get_settings()
@@ -135,6 +136,10 @@ reality_wall = RealityWall(data_dir=settings.world_data_dir, vault_dir=settings.
 # ── Paradox Engine (unreliable narrator post-processor) ───────────────────────
 paradox_engine = ParadoxEngine()
 
+# ── Immersion Middleware (censorship reversion, list flattening, brand filter,
+#    hash-based character-sheet UI gate) ──────────────────────────────────────
+immersion_middleware = ImmersionMiddleware()
+
 # ── Prophetic Buffer (predictive asset pre-generation) ────────────────────────
 _cloud_storyteller = claude if (settings.cloud_provider == "claude" and claude) else gemini
 prophetic_buffer = PropheticBuffer(cache=cache, storyteller=_cloud_storyteller)
@@ -175,6 +180,7 @@ gm_director = GMDirector(
     reality_wall=reality_wall,
     paradox_engine=paradox_engine,
     world_registry=world_registry,
+    immersion_middleware=immersion_middleware,
     image_gen=image_gen,
     elevenlabs=elevenlabs,
     handout_svc=handout_svc,
