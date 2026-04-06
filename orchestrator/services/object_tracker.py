@@ -198,12 +198,7 @@ class ObjectTrackerService:
         if not updates:
             return _row_to_record(row)  # nothing to do
 
-        set_clause = ", ".join(
-            f"{col} = ${i + 2}" for i, col in enumerate(updates)
-        )
-        values = list(updates.values())
-
-        # Special cast for current_state
+        # Build SET clause with explicit PG casts for typed columns
         set_parts = []
         cast_values: list[Any] = []
         for i, (col, val) in enumerate(updates.items(), start=2):
@@ -355,8 +350,8 @@ class ObjectTrackerService:
                     item_labels.append(child["display_name"] if child else item)
                 elif isinstance(item, dict):
                     name = item.get("name", str(item))
-                    qty  = item.get("qty") or item.get("quantity")
-                    item_labels.append(f"{qty}× {name}" if qty else name)
+                    qty  = item.get("qty", item.get("quantity"))
+                    item_labels.append(f"{qty}× {name}" if qty is not None else name)
                 else:
                     item_labels.append(str(item))
             contents_str = ", ".join(item_labels)
