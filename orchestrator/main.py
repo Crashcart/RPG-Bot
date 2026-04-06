@@ -40,6 +40,12 @@ from orchestrator.schemas.payloads import (
     DirectiveType,
     DowntimeSubmitRequest,
     DowntimeTaskStatus,
+    EntityContentsRequest,
+    EntityObjectMutateRequest,
+    EntityObjectRecord,
+    EntityObjectRegisterRequest,
+    EntityObjectState,
+    EntityObjectSummary,
     GMDirective,
     GMDirectiveRequest,
     IntentPayload,
@@ -68,6 +74,7 @@ from orchestrator.services import (
     HandoutService,
     ImageGenService,
     NodeRouter,
+    ObjectTrackerService,
     OllamaClient,
     RAGService,
     RetconService,
@@ -113,6 +120,9 @@ image_gen   = ImageGenService(settings, db)
 elevenlabs  = ElevenLabsClient(settings)
 handout_svc = HandoutService(db, gemini)
 faction_svc = FactionService(db, gemini)
+
+# ── Object Tracker (Persistent Visual & Textual Object State Tracker) ─────────
+object_tracker = ObjectTrackerService(db)
 
 # ── Tier 2: Sub-Agent Dispatcher ─────────────────────────────────────────────
 # Routes delegation tasks from the GM Director to actor/scribe Ollama nodes.
@@ -1380,3 +1390,162 @@ async def get_campaign_world(campaign_id: str) -> WorldSchema:
             detail=f"No world set for campaign {campaign_id}.",
         )
     return schema
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Object Tracker API  (Persistent Visual & Textual Object State Tracker — TDR §3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post(
+    "/api/objects",
+    response_model=EntityObjectRecord,
+    summary="Register a new tracked in-game object",
+    status_code=201,
+    tags=["objects"],
+)
+async def api_register_entity(req: EntityObjectRegisterRequest) -> EntityObjectRecord:
+    """
+    Register a new in-game entity (item, container, artefact, location, …).
+
+    • base_description is immutable after creation.
+    • If phash is provided and a matching entity exists in the same campaign,
+      the existing record is returned (deduplication).
+    • owner_entity_id enables parent-child nesting (e.g. a coin inside a backpack).
+    """
+    try:
+        return await object_tracker.register(req)
+    except Exception as exc:
+        logger.exception("Object register failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get(
+    "/api/objects",
+    response_model=list[EntityObjectRecord],
+    summary="List tracked entities for a campaign",
+    tags=["objects"],
+)
+async def api_list_entities(
+    campaign_id: str,
+    entity_type: str | None = None,
+    state: EntityObjectState | None = None,
+    limit: int = 100,
+) -> list[EntityObjectRecord]:
+    """List all entities for a campaign with optional type/state filters."""
+    try:
+        return await object_tracker.list_by_campaign(
+            campaign_id, entity_type=entity_type, state=state, limit=min(limit, 500)
+        )
+    except Exception as exc:
+        logger.exception("Object list failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get(
+    "/api/objects/{entity_id}",
+    response_model=EntityObjectRecord,
+    summary="Get a single tracked entity by UUID",
+    tags=["objects"],
+)
+async def api_get_entity(entity_id: str) -> EntityObjectRecord:
+    """Retrieve the full state of a tracked entity, including its inventory."""
+    record = await object_tracker.get(entity_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Entity {entity_id} not found.")
+    return record
+
+
+@app.get(
+    "/api/objects/{entity_id}/summary",
+    response_model=EntityObjectSummary,
+    summary="Get a token-efficient LLM summary of an entity",
+    tags=["objects"],
+)
+async def api_entity_summary(entity_id: str) -> EntityObjectSummary:
+    """
+    Compile a token-efficient one-line summary for LLM context injection.
+
+    Example: "Ornate Chest [locked] (img: /assets/gen/abc.png) — An ornate
+    oaken chest bound with iron bands. Contents: empty."
+    """
+    try:
+        return await object_tracker.compile_summary(entity_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Entity {entity_id} not found.")
+    except Exception as exc:
+        logger.exception("Entity summary failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get(
+    "/api/objects/{entity_id}/children",
+    response_model=list[EntityObjectRecord],
+    summary="List child entities owned by this entity",
+    tags=["objects"],
+)
+async def api_entity_children(entity_id: str) -> list[EntityObjectRecord]:
+    """Return all entities directly nested inside this container."""
+    # Verify parent exists first
+    parent = await object_tracker.get(entity_id)
+    if not parent:
+        raise HTTPException(status_code=404, detail=f"Entity {entity_id} not found.")
+    try:
+        return await object_tracker.get_children(entity_id)
+    except Exception as exc:
+        logger.exception("Entity children fetch failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.patch(
+    "/api/objects/{entity_id}",
+    response_model=EntityObjectRecord,
+    summary="Mutate an entity's mutable state (image, lifecycle state, extra_data)",
+    tags=["objects"],
+)
+async def api_mutate_entity(
+    entity_id: str, req: EntityObjectMutateRequest
+) -> EntityObjectRecord:
+    """
+    Apply state changes to an entity.  Rules:
+    • base_description cannot be changed (DB trigger + service guard).
+    • 'destroyed' is terminal — subsequent mutation attempts are rejected.
+    • extra_data is merged (not replaced).
+    """
+    try:
+        return await object_tracker.mutate(entity_id, req)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Entity {entity_id} not found.")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Entity mutate failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post(
+    "/api/objects/{entity_id}/contents",
+    response_model=EntityObjectRecord,
+    summary="Add, remove, or clear items inside a container entity",
+    tags=["objects"],
+)
+async def api_update_contents(
+    entity_id: str, req: EntityContentsRequest
+) -> EntityObjectRecord:
+    """
+    Modify the inventory_array of a container entity.
+
+    • 'add': append an item (entity UUID or inline descriptor).
+    • 'remove': remove the first matching item.
+    • 'clear': empty the entire inventory.
+
+    Rejected with 409 when the entity is locked or destroyed.
+    """
+    try:
+        return await object_tracker.update_contents(entity_id, req)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Entity {entity_id} not found.")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Entity contents update failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
