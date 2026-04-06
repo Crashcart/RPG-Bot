@@ -2,7 +2,7 @@ version: '3.9'
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Ironclad GM — Docker Compose
-# TDR-compliant deployment. Root: /srv/aetheris_v1/
+# TDR-compliant agnostic deployment.
 #
 # Container naming convention (TDR §2-A):
 #   All containers are named ${PROJECT_PREFIX}-<service>.

@@ -88,7 +88,9 @@ _container_running() {
 _port_in_use() {
     local port="$1"
     if command -v ss &>/dev/null; then
-        ss -tuln 2>/dev/null | grep -q ":${port} " || ss -tuln 2>/dev/null | grep -q ":${port}$"
+        local ss_out
+        ss_out=$(ss -tuln 2>/dev/null)
+        grep -q ":${port} " <<< "$ss_out" || grep -q ":${port}$" <<< "$ss_out"
     elif command -v lsof &>/dev/null; then
         lsof -i ":${port}" -sTCP:LISTEN &>/dev/null
     else
@@ -176,7 +178,7 @@ fi
 echo ""
 info "Pre-flight checks passed — starting stack..."
 echo ""
-$DC up -d --build "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
+$DC up -d --build "${EXTRA_ARGS[@]}"
 
 echo ""
 log "Stack is up!"
