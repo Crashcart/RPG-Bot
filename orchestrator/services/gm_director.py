@@ -68,7 +68,9 @@ if TYPE_CHECKING:
     from orchestrator.services.image_gen             import ImageGenService
     from orchestrator.services.node_router           import NodeRouter
     from orchestrator.services.paradox_engine        import ParadoxEngine
+    from orchestrator.services.piper_client          import PiperClient
     from orchestrator.services.reality_wall          import RealityWall
+    from orchestrator.services.speaker_diarizer      import SpeakerDiarizer
     from orchestrator.services.story_memory          import StoryMemoryService
     from orchestrator.services.sub_agent_dispatcher  import SubAgentDispatcher
     from orchestrator.services.telemetry             import TelemetryService
@@ -81,6 +83,7 @@ from orchestrator.prompts.gm_prompts import (
     GM_DIRECTOR_ORCHESTRATOR_CONTEXT,
     GM_PLANNING_PROMPT,
     GM_PLANNING_SYSTEM_PROMPT,
+    GM_SPEAKER_TAG_ADDON,
     GM_STAT_CHANGE_BLOCK,
     GM_SYNTHESIS_PROMPT,
     GM_SYSTEM_PROMPT,
@@ -145,27 +148,32 @@ class GMDirector:
         paradox_engine: "ParadoxEngine | None" = None,
         world_registry: "WorldRegistry | None" = None,
         # ── Multimedia services (optional) ────────────────────────────────
-        image_gen:      "ImageGenService | None" = None,
-        elevenlabs:     "ElevenLabsClient | None" = None,
-        handout_svc:    "HandoutService | None" = None,
-        faction_svc:    "FactionService | None" = None,
+        image_gen:        "ImageGenService | None" = None,
+        elevenlabs:       "ElevenLabsClient | None" = None,
+        handout_svc:      "HandoutService | None" = None,
+        faction_svc:      "FactionService | None" = None,
+        # ── Local TTS pipeline (optional) ─────────────────────────────────
+        piper_client:     "PiperClient | None" = None,
+        speaker_diarizer: "SpeakerDiarizer | None" = None,
         db=None,
     ) -> None:
-        self._gemini         = gemini
-        self._claude         = claude
-        self._cloud_provider = cloud_provider
-        self._node_router    = node_router
-        self._dispatcher     = dispatcher
-        self._story_memory   = story_memory
-        self._telemetry      = telemetry
-        self._reality_wall   = reality_wall
-        self._paradox_engine = paradox_engine
-        self._world_registry = world_registry
-        self._image_gen      = image_gen
-        self._elevenlabs     = elevenlabs
-        self._handout_svc    = handout_svc
-        self._faction_svc    = faction_svc
-        self._db             = db
+        self._gemini           = gemini
+        self._claude           = claude
+        self._cloud_provider   = cloud_provider
+        self._node_router      = node_router
+        self._dispatcher       = dispatcher
+        self._story_memory     = story_memory
+        self._telemetry        = telemetry
+        self._reality_wall     = reality_wall
+        self._paradox_engine   = paradox_engine
+        self._world_registry   = world_registry
+        self._image_gen        = image_gen
+        self._elevenlabs       = elevenlabs
+        self._handout_svc      = handout_svc
+        self._faction_svc      = faction_svc
+        self._piper_client     = piper_client
+        self._speaker_diarizer = speaker_diarizer
+        self._db               = db
 
     # ── Public Interface ───────────────────────────────────────────────────────
 
@@ -325,6 +333,11 @@ class GMDirector:
             except Exception as _wt_exc:
                 logger.debug("World tone injection failed (non-fatal): %s", _wt_exc)
 
+        # ── Piper speaker tagging: prepend tagging addon when Piper is active ─
+        piper_active = self._piper_client is not None and self._piper_client.enabled
+        if piper_active:
+            synthesis_system = GM_SPEAKER_TAG_ADDON + synthesis_system
+
         has_npc_tasks = any(r.task.task_type == "npc_dialogue" for r in sub_results)
         synthesis_coro = storyteller.generate(
             system_prompt=synthesis_system,
@@ -382,7 +395,30 @@ class GMDirector:
             logger.warning("GM Director: fact extraction failed (best-effort): %s", exc)
 
         # ── Task 4: Living Discord Immersion fields ────────────────────────────
-        tts_cues      = _build_tts_cues(sub_results)
+        # When Piper is active, the SpeakerDiarizer replaces the sub-agent TTS
+        # cues with speaker-tagged chunks routed to per-NPC Piper voice models.
+        # Falls back to the existing sub-agent cue list when Piper is off.
+        if piper_active and self._speaker_diarizer:
+            try:
+                final_narrative, tts_cues = await self._speaker_diarizer.diarize(
+                    raw_narrative=final_narrative,
+                    campaign_id=campaign_id,
+                )
+                if self._telemetry:
+                    await self._telemetry.emit(
+                        "piper_diarized",
+                        cues=len(tts_cues),
+                        campaign_id=campaign_id,
+                    )
+            except Exception as diar_exc:
+                logger.warning(
+                    "SpeakerDiarizer failed (non-fatal) — falling back to sub-agent TTS cues: %s",
+                    diar_exc,
+                )
+                tts_cues = _build_tts_cues(sub_results)
+        else:
+            tts_cues = _build_tts_cues(sub_results)
+
         thread_ev, thread_title, thread_body = _build_thread_event(resolution, character.name)
         ambient_key   = _infer_ambient_audio_key(resolution)
         ch_action, ch_key = detect_channel_directive(
