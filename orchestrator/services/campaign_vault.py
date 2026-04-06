@@ -473,14 +473,21 @@ def _export_all(db_path: Path) -> dict:
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
 
-        def _table(name: str) -> list[dict]:
-            return [dict(r) for r in conn.execute(f"SELECT * FROM {name}").fetchall()]
-
+        # Use literal SQL per table — avoids any f-string interpolation and
+        # makes the allowed set of tables explicit in the source.
         return {
-            "campaign_meta":  _table("campaign_meta"),
-            "npc_memories":   _table("npc_memories"),
-            "volatile_state": _table("volatile_state"),
-            "session_log":    _table("session_log"),
+            "campaign_meta": [
+                dict(r) for r in conn.execute("SELECT * FROM campaign_meta").fetchall()
+            ],
+            "npc_memories": [
+                dict(r) for r in conn.execute("SELECT * FROM npc_memories").fetchall()
+            ],
+            "volatile_state": [
+                dict(r) for r in conn.execute("SELECT * FROM volatile_state").fetchall()
+            ],
+            "session_log": [
+                dict(r) for r in conn.execute("SELECT * FROM session_log").fetchall()
+            ],
         }
 
 

@@ -42,10 +42,12 @@ from orchestrator.schemas.payloads import (
     DowntimeTaskStatus,
     GMDirective,
     GMDirectiveRequest,
+    ImportCampaignRequest,
     IntentPayload,
     NarrativeResponsePayload,
     PipelineResult,
     PresenceUpdate,
+    ProvisionCampaignRequest,
     RecapRequest,
     RecapResponse,
     RetconRequest,
@@ -1401,7 +1403,7 @@ async def get_campaign_world(campaign_id: str) -> WorldSchema:
 )
 async def provision_campaign_vault(
     campaign_id: str,
-    req: dict = {},
+    req: ProvisionCampaignRequest = ProvisionCampaignRequest(),
 ) -> dict:
     """
     Create an isolated SQLite database for *campaign_id* (must be a UUID v4).
@@ -1414,9 +1416,9 @@ async def provision_campaign_vault(
     try:
         db_path = await campaign_vault.provision(
             campaign_id=campaign_id,
-            name=req.get("name", ""),
-            world=req.get("world", ""),
-            metadata=req.get("metadata", {}),
+            name=req.name,
+            world=req.world,
+            metadata=req.metadata,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
@@ -1437,9 +1439,9 @@ async def provision_campaign_vault(
             """,
             campaign_id,
             str(db_path),
-            req.get("name", ""),
-            req.get("world", ""),
-            json.dumps(req.get("metadata", {})),
+            req.name,
+            req.world,
+            json.dumps(req.metadata),
         )
     except Exception as exc:
         logger.warning("Campaign vault registry update skipped: %s", exc)
@@ -1535,7 +1537,7 @@ async def export_campaign_vault(campaign_id: str) -> dict:
     summary="Import a campaign vault snapshot into an existing vault",
     tags=["campaign-vault"],
 )
-async def import_campaign_vault(campaign_id: str, req: dict) -> dict:
+async def import_campaign_vault(campaign_id: str, req: ImportCampaignRequest) -> dict:
     """
     Import a portable snapshot produced by ``/api/campaigns/{id}/export``
     into the vault for *campaign_id*.
@@ -1548,15 +1550,9 @@ async def import_campaign_vault(campaign_id: str, req: dict) -> dict:
     Raises 400 if *campaign_id* is not a valid UUID v4 or the snapshot is
     from an unsupported schema version.
     """
-    snapshot = req.get("snapshot")
-    if not snapshot:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="snapshot required")
-
-    merge = bool(req.get("merge", False))
-
     try:
-        await campaign_vault.import_snapshot(campaign_id, snapshot, merge=merge)
+        await campaign_vault.import_snapshot(campaign_id, req.snapshot, merge=req.merge)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
-    return {"campaign_id": campaign_id, "imported": True, "merge": merge}
+    return {"campaign_id": campaign_id, "imported": True, "merge": req.merge}
