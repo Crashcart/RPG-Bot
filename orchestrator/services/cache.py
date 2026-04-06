@@ -113,3 +113,27 @@ class CacheService:
         if not raw:
             return None
         return json.loads(raw)
+
+    # ── Generic Key/Value Store ────────────────────────────────────────────────
+
+    async def set(self, key: str, value: str, ttl: int | None = None) -> None:
+        """Write an arbitrary string value.  Pass ttl (seconds) to add expiry."""
+        if ttl:
+            await self.client.setex(key, ttl, value)
+        else:
+            await self.client.set(key, value)
+
+    async def get(self, key: str) -> str | None:
+        """Read an arbitrary string value; returns None if key is absent."""
+        return await self.client.get(key)
+
+    async def delete(self, key: str) -> None:
+        """Remove an arbitrary key."""
+        await self.client.delete(key)
+
+    # ── Raw Redis access (for callers that need full Redis API) ───────────────
+
+    @property
+    def _redis(self) -> aioredis.Redis:
+        """Direct access to the underlying Redis client for advanced operations."""
+        return self.client
