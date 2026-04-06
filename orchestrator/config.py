@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     chroma_host: str = "ironclad-chroma"
     chroma_port: int = 8000
 
+    # ── NATS Message Bus (TDR §3) ─────────────────────────────────────────────
+    nats_host: str = "aetheris-nats"
+    nats_port: int = 4222
+
+    # ── Map Renderer (TDR §4 Option 2) ───────────────────────────────────────
+    map_renderer_url: str = "http://aetheris-map:3001"
+
     # ── Media Proxy ───────────────────────────────────────────────────────────
     media_proxy_url: str = "http://media-asset-proxy:8001"
 

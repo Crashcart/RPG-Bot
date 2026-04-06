@@ -1,0 +1,16 @@
+{
+  "name": "aetheris-map-renderer",
+  "version": "1.0.0",
+  "description": "Fog-of-War PNG map renderer — subscribes to NATS, renders via canvas, caches in Redis.",
+  "main": "renderer.js",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "canvas": "^2.11.2",
+    "http": "^0.0.1-security",
+    "ioredis": "^5.4.1",
+    "nats": "^2.28.2"
+  }
+}

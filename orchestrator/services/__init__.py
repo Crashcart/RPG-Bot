@@ -28,6 +28,8 @@ from .elevenlabs_client import ElevenLabsClient
 from .handout_service import HandoutService
 from .faction_service import FactionService
 from .openai_compat_client import OpenAICompatClient
+from .nats_bus import NATSBus
+from .fog_of_war import FogOfWarService
 
 __all__ = [
     "DatabaseService",
@@ -60,4 +62,6 @@ __all__ = [
     "HandoutService",
     "FactionService",
     "OpenAICompatClient",
+    "NATSBus",
+    "FogOfWarService",
 ]

@@ -37,12 +37,15 @@ from orchestrator.pipeline import (
 from orchestrator.routers import auth_router, web_router
 from orchestrator.schemas.payloads import (
     CampfireStatus,
+    CoordinateUpdatePayload,
     DirectiveType,
     DowntimeSubmitRequest,
     DowntimeTaskStatus,
+    FogRevealPayload,
     GMDirective,
     GMDirectiveRequest,
     IntentPayload,
+    MapStatePayload,
     NarrativeResponsePayload,
     PipelineResult,
     PresenceUpdate,
@@ -63,10 +66,12 @@ from orchestrator.services import (
     DowntimeService,
     ElevenLabsClient,
     FactionService,
+    FogOfWarService,
     GeminiClient,
     GMDirector,
     HandoutService,
     ImageGenService,
+    NATSBus,
     NodeRouter,
     OllamaClient,
     RAGService,
@@ -161,6 +166,13 @@ sic = SystemIntegrityCheck(
 # Give janitor a reference so it runs SIC after each backup cycle.
 janitor._sic = sic
 
+# ── NATS Message Bus (TDR §3) ─────────────────────────────────────────────────
+nats_bus = NATSBus(settings)
+
+# ── Fog of War Service (TDR §4) — constructed after nats_bus ─────────────────
+# FogOfWarService requires both cache and nats_bus; both are connected in lifespan.
+fog_of_war: FogOfWarService | None = None
+
 # ── Tier 1: GM Director (Central Storyteller) ─────────────────────────────────
 # Selects the storyteller per-turn (Gemini or auto-promoted Ollama), runs the
 # planning pass, dispatches sub-agents, synthesizes, and applies immersion filters.
@@ -232,6 +244,15 @@ async def lifespan(app: FastAPI):
     await prophetic_buffer.start()
     await janitor.start()
 
+    # ── NATS Bus + Fog-of-War (TDR §3/§4) ────────────────────────────────────
+    global fog_of_war
+    try:
+        await nats_bus.connect()
+        fog_of_war = FogOfWarService(cache=cache, nats_bus=nats_bus, settings=settings)
+        logger.info("NATS bus and FogOfWarService initialised.")
+    except Exception as exc:
+        logger.warning("NATS unavailable — map features disabled: %s", exc)
+
     # ── System Integrity Check (TDR §1) ──────────────────────────────────────
     # Inject cache reference now that cache is connected.
     sic._cache = cache
@@ -278,6 +299,7 @@ async def lifespan(app: FastAPI):
     await prophetic_buffer.stop()
     await janitor.stop()
     await node_router.stop()
+    await nats_bus.disconnect()
     await db.disconnect()
     await cache.disconnect()
 
@@ -1250,6 +1272,85 @@ async def telemetry_websocket(websocket: WebSocket):
 @app.get("/health", summary="Health check")
 async def health() -> dict:
     return {"status": "ok", "service": "ironclad-orchestrator"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Map & Fog-of-War API (TDR §3/§4)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get(
+    "/api/map/{campaign_id}",
+    summary="Get Fog-of-War state + map PNG URL for a campaign",
+    tags=["map"],
+)
+async def api_map_state(campaign_id: str) -> MapStatePayload:
+    """
+    Returns the current revealed cell set, all entity positions, and the HTTP
+    URL of the rendered PNG served by the map-renderer container.
+    """
+    if fog_of_war is None:
+        raise HTTPException(status_code=503, detail="Map features unavailable (NATS offline).")
+    revealed   = await fog_of_war.get_revealed(campaign_id)
+    positions  = await fog_of_war.get_positions(campaign_id)
+    map_png_url = fog_of_war.get_map_png_url(campaign_id)
+    return MapStatePayload(
+        campaign_id=campaign_id,
+        revealed_cells=revealed,
+        positions=positions,
+        map_png_url=map_png_url,
+    )
+
+
+@app.post(
+    "/api/map/move",
+    summary="Move an entity token on the campaign map",
+    tags=["map"],
+)
+async def api_map_move(req: CoordinateUpdatePayload) -> dict:
+    """
+    Updates the entity's grid position, auto-reveals nearby Fog-of-War cells,
+    and triggers the map-renderer to redraw the campaign PNG via NATS.
+    """
+    if fog_of_war is None:
+        raise HTTPException(status_code=503, detail="Map features unavailable (NATS offline).")
+    await fog_of_war.update_position(
+        campaign_id=req.campaign_id,
+        entity_id=req.entity_id,
+        x=req.x,
+        y=req.y,
+        token=req.token,
+        reveal_radius=req.reveal_radius,
+    )
+    return {"status": "ok", "campaign_id": req.campaign_id, "x": req.x, "y": req.y}
+
+
+@app.post(
+    "/api/map/reveal",
+    summary="Reveal explicit Fog-of-War cells for a campaign",
+    tags=["map"],
+)
+async def api_map_reveal(req: FogRevealPayload) -> dict:
+    """
+    Reveals the specified grid cell indices (flat index = row * cols + col)
+    without moving any token. Useful for GM-controlled scene reveals.
+    """
+    if fog_of_war is None:
+        raise HTTPException(status_code=503, detail="Map features unavailable (NATS offline).")
+    await fog_of_war.reveal_cells(req.campaign_id, req.cells)
+    return {"status": "ok", "campaign_id": req.campaign_id, "revealed": len(req.cells)}
+
+
+@app.post(
+    "/api/map/reset/{campaign_id}",
+    summary="Reset Fog-of-War and token positions for a campaign",
+    tags=["map"],
+)
+async def api_map_reset(campaign_id: str) -> dict:
+    """Clears all Fog-of-War data and entity tokens for the specified campaign."""
+    if fog_of_war is None:
+        raise HTTPException(status_code=503, detail="Map features unavailable (NATS offline).")
+    await fog_of_war.reset_map(campaign_id)
+    return {"status": "ok", "campaign_id": campaign_id}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
