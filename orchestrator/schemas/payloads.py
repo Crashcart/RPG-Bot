@@ -561,6 +561,16 @@ class NarrativeResponsePayload(BaseModel):
         ),
     )
 
+    # ── Immersion Middleware: Character Sheet UI Gate (TDR §3C) ──────────────
+    render_character_sheet: bool = Field(
+        default=False,
+        description=(
+            "True only when the player's state hash changed this turn. "
+            "The Discord bot suppresses the character-sheet embed when False, "
+            "preventing stat-block spam on turns where nothing changed."
+        ),
+    )
+
     # ── Multimedia: Music, SFX, Images, Handouts ─────────────────────────
     sfx_cues: list[SFXCue] = Field(
         default_factory=list,
