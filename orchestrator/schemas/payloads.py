@@ -840,3 +840,29 @@ class GMDirective(BaseModel):
     status:          str  = "pending"    # pending | consumed | cancelled
     submitted_at:    datetime
     consumed_at:     datetime | None = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Campaign Vault — Multi-Tenant Request Models (TDR §2-3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ProvisionCampaignRequest(BaseModel):
+    """Request body for POST /api/campaigns/{campaign_id}/provision."""
+    name:     str            = Field(default="", description="Human-readable campaign name")
+    world:    str            = Field(default="", description="Active world/genre at provisioning time")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Arbitrary extra metadata")
+
+
+class ImportCampaignRequest(BaseModel):
+    """Request body for POST /api/campaigns/{campaign_id}/import."""
+    snapshot: dict[str, Any] = Field(
+        ...,
+        description="Snapshot produced by GET /api/campaigns/{campaign_id}/export",
+    )
+    merge: bool = Field(
+        default=False,
+        description=(
+            "When False (default) npc_memories and volatile_state are replaced. "
+            "When True incoming rows are appended, keeping existing data."
+        ),
+    )

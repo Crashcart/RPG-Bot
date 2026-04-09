@@ -1,3 +1,4 @@
+from .campaign_vault import CampaignVault
 from .database import DatabaseService
 from .cache import CacheService
 from .ollama_client import OllamaClient
@@ -59,5 +60,6 @@ __all__ = [
     "ElevenLabsClient",
     "HandoutService",
     "FactionService",
+    "CampaignVault",
     "OpenAICompatClient",
 ]
