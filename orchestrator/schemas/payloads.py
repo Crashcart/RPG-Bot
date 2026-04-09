@@ -840,3 +840,153 @@ class GMDirective(BaseModel):
     status:          str  = "pending"    # pending | consumed | cancelled
     submitted_at:    datetime
     consumed_at:     datetime | None = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Persistent Visual & Textual Object State Tracker (TDR §3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class EntityObjectState(str, Enum):
+    """
+    Lifecycle state for a tracked in-game object.
+
+    - active:    Normal state; contents can be added/removed freely.
+    - locked:    Object is sealed (e.g. a locked chest). Contents mutations
+                 are rejected until the state is legally changed back to active.
+    - destroyed: Object is permanently unusable. Both add-contents and
+                 retrieve-contents calls are rejected; state is terminal.
+    """
+    ACTIVE    = "active"
+    LOCKED    = "locked"
+    DESTROYED = "destroyed"
+
+
+class EntityObjectRegisterRequest(BaseModel):
+    """
+    Request body for POST /api/objects — register a new tracked entity.
+
+    base_description is immutable after creation (enforced at DB level).
+    image_url and phash are optional at registration and can be populated
+    later when the image is generated.
+    """
+    campaign_id:      str  = Field(..., description="Campaign UUID this entity belongs to")
+    display_name:     str  = Field(..., description="Short human-readable name, e.g. 'Ornate Chest'")
+    entity_type:      str  = Field(
+        default="item",
+        description="item | container | location | npc | vehicle | artefact",
+    )
+    base_description: str  = Field(
+        default="",
+        description="Immutable canonical description — written once, never altered",
+    )
+    image_url:        str  = Field(default="", description="Media-proxy URL for the associated image")
+    phash:            int | None = Field(
+        default=None,
+        description="64-bit perceptual hash of image for deduplication (None = no image)",
+    )
+    owner_entity_id:  str | None = Field(
+        default=None,
+        description="Parent entity UUID — set when this object is inside another (e.g. coin in backpack)",
+    )
+    extra_data:       dict[str, Any] = Field(
+        default_factory=dict,
+        description="System-specific metadata (stats, magic properties, etc.)",
+    )
+
+
+class EntityObjectRecord(BaseModel):
+    """
+    Full entity object record returned from GET /api/objects/{entity_id}.
+    Mirrors the entity_objects DB row.
+    """
+    entity_id:        str
+    campaign_id:      str
+    display_name:     str
+    entity_type:      str
+    image_url:        str
+    phash:            int | None         = None
+    base_description: str
+    current_state:    EntityObjectState  = EntityObjectState.ACTIVE
+    inventory_array:  list[Any]          = Field(default_factory=list)
+    owner_entity_id:  str | None         = None
+    extra_data:       dict[str, Any]     = Field(default_factory=dict)
+    created_at:       datetime
+    updated_at:       datetime
+
+
+class EntityObjectMutateRequest(BaseModel):
+    """
+    Request body for PATCH /api/objects/{entity_id} — update mutable fields.
+
+    Only non-None fields are applied.  base_description cannot be changed here;
+    the DB trigger will reject any attempt to do so.
+    current_state = destroyed is a one-way terminal transition.
+    """
+    new_state:   EntityObjectState | None = Field(
+        default=None,
+        description="New lifecycle state; destroyed is terminal and cannot be reversed",
+    )
+    image_url:   str | None = Field(
+        default=None,
+        description="Replace the image URL (e.g. after a new image is generated)",
+    )
+    phash:       int | None = Field(
+        default=None,
+        description="Updated perceptual hash when image_url changes",
+    )
+    extra_data:  dict[str, Any] | None = Field(
+        default=None,
+        description="Merged (not replaced) into the existing extra_data JSONB",
+    )
+    changed_by:  str = Field(
+        default="system",
+        description="Discord snowflake, 'gm', or 'system' — recorded in audit history",
+    )
+    change_note: str = Field(default="", description="Short reason for the state change")
+
+
+class ContentsOperationType(str, Enum):
+    ADD    = "add"
+    REMOVE = "remove"
+    CLEAR  = "clear"
+
+
+class EntityContentsRequest(BaseModel):
+    """
+    Request body for POST /api/objects/{entity_id}/contents —
+    add, remove, or clear items inside a container entity.
+
+    Rejected when current_state is locked or destroyed.
+    """
+    operation:   ContentsOperationType = Field(
+        ...,
+        description="add | remove | clear",
+    )
+    item:        Any | None = Field(
+        default=None,
+        description=(
+            "For 'add': an entity UUID string or an inline item descriptor dict. "
+            "For 'remove': the entity UUID string or exact inline descriptor to remove. "
+            "For 'clear': ignored."
+        ),
+    )
+    changed_by:  str = Field(default="system", description="Actor performing the change")
+    change_note: str = Field(default="", description="Short reason for audit log")
+
+
+class EntityObjectSummary(BaseModel):
+    """
+    Token-efficient compiled summary for LLM context injection.
+
+    Instead of sending the full JSON history of an entity to the AI, this
+    compiles it into a single, token-efficient string (TDR Option 3).
+
+    Example summary_text:
+      "A worn leather backpack [active] (img: /assets/gen/abc.png)
+       containing: Silver Dagger, 3× Healing Potion, Rusted Key."
+    """
+    entity_id:    str
+    display_name: str
+    summary_text: str  = Field(..., description="Compiled one-line summary for LLM injection")
+    image_url:    str  = Field(default="")
+    current_state: EntityObjectState

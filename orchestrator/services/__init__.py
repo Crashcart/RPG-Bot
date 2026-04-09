@@ -28,6 +28,7 @@ from .elevenlabs_client import ElevenLabsClient
 from .handout_service import HandoutService
 from .faction_service import FactionService
 from .openai_compat_client import OpenAICompatClient
+from .object_tracker import ObjectTrackerService
 
 __all__ = [
     "DatabaseService",
@@ -60,4 +61,5 @@ __all__ = [
     "HandoutService",
     "FactionService",
     "OpenAICompatClient",
+    "ObjectTrackerService",
 ]
