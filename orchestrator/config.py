@@ -109,6 +109,13 @@ class Settings(BaseSettings):
     # GFS backup target (Janitor writes here)
     backups_dir:    str = "/app/backups"
 
+    # ── ABES — Autonomous Background Entity Simulation ────────────────────────
+    # Interval (seconds) between world-tick sweeps.  Default: 3600 (1 hour).
+    abes_tick_interval_seconds: int = 3600
+    # Global Discord webhook URL for critical ABES push notifications.
+    # Per-campaign overrides are stored in global_settings.abes_webhook_url.
+    abes_webhook_url: str = ""
+
     # ── App ───────────────────────────────────────────────────────────────────
     log_level:          str = "INFO"
     session_secret_key: str = "change-me-to-a-long-random-string"

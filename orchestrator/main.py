@@ -36,6 +36,7 @@ from orchestrator.pipeline import (
 )
 from orchestrator.routers import auth_router, web_router
 from orchestrator.schemas.payloads import (
+    AbsTickResult,
     CampfireStatus,
     DirectiveType,
     DowntimeSubmitRequest,
@@ -44,14 +45,20 @@ from orchestrator.schemas.payloads import (
     GMDirectiveRequest,
     IntentPayload,
     NarrativeResponsePayload,
+    NpcEntityRequest,
+    NpcEntityStatus,
+    OfflineOrderRequest,
+    OfflineOrderStatus,
     PipelineResult,
     PresenceUpdate,
     RecapRequest,
     RecapResponse,
     RetconRequest,
     RetconResponse,
+    WorldDeltaEntry,
 )
 from orchestrator.services import (
+    AbsService,
     AdminBackchannelService,
     AuthService,
     CacheService,
@@ -202,6 +209,7 @@ retcon:      RetconService           | None = None
 backchannel: AdminBackchannelService | None = None
 auth:        AuthService             | None = None
 sandbox:     SandboxService          | None = None
+abes:        AbsService              | None = None
 
 
 async def _downtime_resolver_loop() -> None:
@@ -214,6 +222,32 @@ async def _downtime_resolver_loop() -> None:
                 await downtime.resolve_pending()
         except Exception as exc:
             logger.error("Downtime resolver loop error: %s", exc)
+
+
+async def _abes_tick_loop() -> None:
+    """
+    Background task: runs ABES world ticks on the configured interval.
+    Default interval is 3600 s (1 hour).  Advances all NPC/faction entities
+    whose next_tick_at has passed and fires Discord webhook notifications for
+    critical world events.
+    """
+    import asyncio
+    while True:
+        await asyncio.sleep(settings.abes_tick_interval_seconds)
+        try:
+            if abes:
+                results = await abes.tick_all_campaigns()
+                if results:
+                    total_ticked  = sum(r.entities_ticked  for r in results)
+                    total_events  = sum(r.events_generated for r in results)
+                    total_crit    = sum(r.critical_events  for r in results)
+                    logger.info(
+                        "ABES world tick: %d campaign(s), %d entities, "
+                        "%d events (%d critical)",
+                        len(results), total_ticked, total_events, total_crit,
+                    )
+        except Exception as exc:
+            logger.error("ABES tick loop error: %s", exc)
 
 
 @asynccontextmanager
@@ -245,7 +279,7 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(f"System Integrity Check failed: {msgs}")
 
     # Initialise async-session services now that db.pool is live
-    global chronicle, campfire, downtime, retcon, backchannel, auth, sandbox
+    global chronicle, campfire, downtime, retcon, backchannel, auth, sandbox, abes
     chronicle   = ChronicleService(settings, db.pool)
     campfire    = CampfireService(settings, db.pool)
     downtime    = DowntimeService(settings, db.pool)
@@ -258,6 +292,7 @@ async def lifespan(app: FastAPI):
         story_memory=story_memory,
         web_search=web_search,
     )
+    abes        = AbsService(settings, db.pool)
 
     # Expose services to web router and middleware
     app.state.backchannel = backchannel
@@ -266,10 +301,17 @@ async def lifespan(app: FastAPI):
 
     # Start downtime background resolver
     resolver_task = asyncio.create_task(_downtime_resolver_loop())
+    # Start ABES world-tick background loop
+    abes_task = asyncio.create_task(_abes_tick_loop())
 
     yield
 
     logger.info("Shutting down Ironclad GM Orchestrator…")
+    abes_task.cancel()
+    try:
+        await abes_task
+    except asyncio.CancelledError:
+        pass
     resolver_task.cancel()
     try:
         await resolver_task
@@ -753,6 +795,121 @@ async def api_mark_notified(task_id: str) -> dict:
         raise HTTPException(status_code=503, detail="Downtime service not initialised.")
     await downtime.mark_notified(task_id)
     return {"status": "ok", "task_id": task_id}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ABES — Autonomous Background Entity Simulation API
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post(
+    "/api/abes/npc",
+    response_model=NpcEntityStatus,
+    summary="Register or update a background NPC/faction entity for autonomous simulation",
+    status_code=201,
+)
+async def api_abes_register_entity(req: NpcEntityRequest) -> NpcEntityStatus:
+    """
+    Register an NPC, faction, creature, or vehicle so that the ABES engine
+    advances it automatically on the world-tick interval.  If an entity with
+    the same name already exists in the campaign it will be updated.
+    """
+    if not abes:
+        raise HTTPException(status_code=503, detail="ABES service not initialised.")
+    try:
+        return await abes.register_entity(req)
+    except Exception as exc:
+        logger.exception("ABES register entity failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get(
+    "/api/abes/npc/{campaign_id}",
+    response_model=list[NpcEntityStatus],
+    summary="List all background entities for a campaign",
+)
+async def api_abes_list_entities(campaign_id: str) -> list[NpcEntityStatus]:
+    if not abes:
+        raise HTTPException(status_code=503, detail="ABES service not initialised.")
+    return await abes.list_entities(campaign_id)
+
+
+@app.get(
+    "/api/abes/npc/{campaign_id}/{entity_id}",
+    response_model=NpcEntityStatus,
+    summary="Fetch a single background entity by ID",
+)
+async def api_abes_get_entity(campaign_id: str, entity_id: str) -> NpcEntityStatus:
+    if not abes:
+        raise HTTPException(status_code=503, detail="ABES service not initialised.")
+    entity = await abes.get_entity(entity_id, campaign_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found.")
+    return entity
+
+
+@app.get(
+    "/api/world-delta/{campaign_id}",
+    response_model=list[WorldDeltaEntry],
+    summary="Fetch recent world-delta events for narrative catch-up (RAG rehydration)",
+)
+async def api_world_delta(
+    campaign_id: str,
+    limit:       int = 20,
+    significance: str | None = None,
+) -> list[WorldDeltaEntry]:
+    """
+    Returns the most recent background world events for a campaign.
+    The Discord bot / GM Director calls this on player login to translate cold
+    database changes into organic in-character rumours via the RAG engine.
+
+    ``significance`` can be ``minor``, ``major``, or ``critical`` to filter
+    by event importance.
+    """
+    if not abes:
+        raise HTTPException(status_code=503, detail="ABES service not initialised.")
+    return await abes.get_world_delta(campaign_id, limit=limit, significance=significance)
+
+
+@app.post(
+    "/api/abes/offline-orders",
+    response_model=OfflineOrderStatus,
+    summary="Submit offline orders for a character or companion before logging off",
+    status_code=201,
+)
+async def api_abes_offline_orders(req: OfflineOrderRequest) -> OfflineOrderStatus:
+    """
+    A player submits instructions for what their character (or a companion)
+    should do while they are offline.  The ABES engine resolves the task on
+    the next world tick and adds the result to ``world_delta`` so the GM can
+    incorporate it into the catch-up narrative when the player returns.
+    """
+    if not abes:
+        raise HTTPException(status_code=503, detail="ABES service not initialised.")
+    try:
+        return await abes.submit_offline_order(req)
+    except Exception as exc:
+        logger.exception("ABES offline order submit failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post(
+    "/api/abes/tick",
+    response_model=list[AbsTickResult],
+    summary="Admin: manually trigger a world-tick pass (useful for testing)",
+)
+async def api_abes_manual_tick() -> list[AbsTickResult]:
+    """
+    Manually trigger a full ABES world-tick pass across all active campaigns.
+    Intended for admin use and integration testing; the background loop runs
+    automatically on the configured interval.
+    """
+    if not abes:
+        raise HTTPException(status_code=503, detail="ABES service not initialised.")
+    try:
+        return await abes.tick_all_campaigns()
+    except Exception as exc:
+        logger.exception("ABES manual tick failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
