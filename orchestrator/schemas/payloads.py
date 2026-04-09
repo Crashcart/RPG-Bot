@@ -415,21 +415,69 @@ class ThreadEvent(str, Enum):
     CLOSE  = "close"
 
 
+class PiperVoiceProfile(BaseModel):
+    """
+    Persistent Piper TTS voice assignment for a single NPC.
+
+    Stored in the npc_voice_profiles table and returned by the orchestrator's
+    NPC voice API.  The SpeakerDiarizer uses this to ensure every NPC sounds
+    exactly the same across sessions, even months apart.
+    """
+    npc_name:       str   = Field(..., description="NPC name (lowercased, unique per campaign)")
+    campaign_id:    str   = Field(..., description="Campaign UUID")
+    voice_model_id: str   = Field(
+        default="en_US-lessac-medium",
+        description="Piper voice model name (e.g. 'en_US-lessac-medium'). "
+                    "Must match a .onnx file in the piper-tts /models directory.",
+    )
+    speed_scale:    float = Field(
+        default=1.0, ge=0.1, le=4.0,
+        description="Playback speed multiplier. >1 = faster (nervous/frantic), "
+                    "<1 = slower (deliberate/menacing).",
+    )
+    noise_scale:    float = Field(
+        default=0.667, ge=0.0, le=1.0,
+        description="Phoneme duration variability (0 = robotic, 1 = very expressive).",
+    )
+    noise_w:        float = Field(
+        default=0.8, ge=0.0, le=1.0,
+        description="Pitch variability (0 = monotone, 1 = highly varied).",
+    )
+    tts_provider:   str   = Field(
+        default="piper",
+        description="TTS engine for this NPC: piper | edge_tts | elevenlabs | openai_tts",
+    )
+
+
 class TTSCue(BaseModel):
     """
     A text-to-speech audio cue for Discord voice channel playback.
 
-    Generated for every npc_dialogue sub-agent result.  The Discord bot
-    uses edge-tts with the specified voice_id to generate audio and plays
-    it sequentially in the voice channel after ambient audio starts.
+    Generated for every npc_dialogue sub-agent result and every speaker-tagged
+    segment produced by the SpeakerDiarizer when Piper TTS is active.
+
+    The Discord bot selects the TTS provider from the tts_provider system_setting:
+      • edge_tts     — free Microsoft Edge TTS (default; no key needed)
+      • elevenlabs   — ElevenLabs cloud TTS
+      • openai_tts   — OpenAI /audio/speech endpoint
+      • piper        — local Piper TTS service (zero cost, CPU-only)
+
+    For Piper cues, voice_id is the Piper model name (e.g. "en_US-lessac-medium").
+    For edge_tts cues, voice_id is an edge-tts voice name (e.g. "en-US-GuyNeural").
     """
-    entity_name: str  = Field(..., description="NPC name or source label")
-    text:        str  = Field(..., description="Dialogue text to speak aloud")
+    entity_name: str  = Field(..., description="NPC name or 'Narrator'")
+    text:        str  = Field(..., description="Text to speak aloud")
     voice_id:    str  = Field(
         default="en-US-GuyNeural",
-        description="edge-tts voice name — tied to the Ollama node that generated this dialogue",
+        description=(
+            "TTS voice identifier. For Piper: model name (e.g. 'en_US-lessac-medium'). "
+            "For edge_tts: voice name (e.g. 'en-US-GuyNeural')."
+        ),
     )
-    node_name:   str  = Field(default="unknown", description="Originating sub-agent node")
+    node_name:   str  = Field(
+        default="unknown",
+        description="Originating node or provider label (e.g. 'piper', 'edge_tts', node hostname)",
+    )
 
 
 class SFXCue(BaseModel):

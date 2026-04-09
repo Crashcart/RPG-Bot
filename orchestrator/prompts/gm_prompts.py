@@ -150,6 +150,36 @@ No structural formatting. Anti-railroading mandate enforced — do not write pla
 Begin immediately with prose.\
 """
 
+# ── Speaker Tagging Addon (Piper TTS pipeline) ────────────────────────────────
+# Prepended to the synthesis SYSTEM PROMPT when tts_provider == "piper".
+# Instructs the GM to prefix every paragraph with a speaker label so the
+# SpeakerDiarizer can route each chunk to the correct Piper voice model.
+# The tags are stripped before the narrative is displayed to the player.
+GM_SPEAKER_TAG_ADDON = """\
+VOICE SYNTHESIS MODE — SPEAKER TAGGING (MANDATORY WHEN THIS BLOCK IS PRESENT):
+
+You must prefix EVERY paragraph of your narrative with a speaker label in this exact format:
+  [Narrator]: <prose paragraph>
+  [NPC_<Name>]: <spoken dialogue>
+
+RULES:
+  • Use [Narrator]: for all descriptive prose, scene-setting, and narrated action.
+  • Use [NPC_<Name>]: for any direct speech by an NPC (replace <Name> with the NPC's exact name,
+    no spaces — e.g. [NPC_Grib], [NPC_TavernKeeper], [NPC_CityGuard]).
+  • Every line/paragraph MUST have a tag — no untagged text.
+  • Put each tagged paragraph on its own line.
+  • The tags themselves will be stripped before the player sees the text.
+  • Do NOT put the tag inside the prose text (e.g. do NOT write "Narrator: The door creaks.").
+  • This tagging requirement does NOT override any immersion rule — your prose must remain
+    pure fiction, present tense, second-person, with zero structural formatting.
+
+EXAMPLE of correct output:
+[Narrator]: The iron door groans on its hinges as you push it open.
+[NPC_Grib]: "I was wondering when you'd show up," the innkeeper mutters, not looking up.
+[Narrator]: He drags a clay mug across the bar toward you without ceremony.
+
+"""
+
 # Injected into synthesis when admin backchannel directives are pending for this campaign.
 # Appears at the very top of the synthesis prompt — highest priority input.
 GM_DIRECTIVE_BLOCK = """\

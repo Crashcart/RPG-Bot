@@ -90,6 +90,15 @@ class Settings(BaseSettings):
     openai_tts_model: str = "tts-1"
     openai_tts_voice: str = "onyx"
 
+    # ── Piper TTS (local neural TTS — zero cost, CPU-only) ───────────────────
+    # URL of the piper-tts Docker service (see piper-tts/ in the project root).
+    # Set to empty string to disable Piper and use the cloud TTS fallback.
+    piper_url: str = "http://piper-tts:5500"
+    # Voice model for GM Narrator prose (warm, measured American English)
+    piper_default_narrator_model: str = "en_US-lessac-medium"
+    # Default voice model for new NPCs (distinctly different from narrator)
+    piper_default_npc_model: str = "en_US-ryan-high"
+
     # ── SillyTavern (external OpenAI-compatible frontend proxy) ───────────────
     # SillyTavern is NOT installed as part of this stack.
     # Point sillytavern_url at an existing SillyTavern instance.
