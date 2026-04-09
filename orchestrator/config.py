@@ -109,6 +109,27 @@ class Settings(BaseSettings):
     # GFS backup target (Janitor writes here)
     backups_dir:    str = "/app/backups"
 
+    # ── Speculative Narrative Pre-Computation (Zero-Latency Engine) ──────────
+    # After each pipeline turn the engine predicts the top-N most likely next
+    # player actions and pre-generates GM narrative text for each branch.
+    # When the player submits their command, a fast keyword match resolves the
+    # best cached branch.  On a hit the expensive cloud storyteller call is
+    # skipped, yielding near-zero narration latency.
+    speculative_engine_enabled:     bool  = True
+    # Maximum branches to pre-generate per turn.  Automatically scaled down to
+    # 2 (moderate CPU/RAM load) or 1 (heavy load) by the engine; set to 0 to
+    # disable background generation while keeping cache lookups active.
+    speculative_branches:           int   = 3
+    # Redis TTL (seconds) for cached speculative branches.
+    speculative_ttl_seconds:        int   = 300
+    # Minimum keyword-match score [0.0–1.0] to accept a cache hit.
+    speculative_similarity_threshold: float = 0.30
+    # CPU / RAM thresholds (%) for dynamic branch scaling.
+    speculative_cpu_scale_down:     int   = 70   # reduce to 2 branches
+    speculative_cpu_disable:        int   = 85   # reduce to 1 branch
+    speculative_ram_scale_down:     int   = 80   # reduce to 2 branches
+    speculative_ram_disable:        int   = 90   # reduce to 1 branch
+
     # ── App ───────────────────────────────────────────────────────────────────
     log_level:          str = "INFO"
     session_secret_key: str = "change-me-to-a-long-random-string"

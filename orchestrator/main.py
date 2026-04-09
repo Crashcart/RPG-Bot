@@ -135,9 +135,13 @@ reality_wall = RealityWall(data_dir=settings.world_data_dir, vault_dir=settings.
 # ── Paradox Engine (unreliable narrator post-processor) ───────────────────────
 paradox_engine = ParadoxEngine()
 
-# ── Prophetic Buffer (predictive asset pre-generation) ────────────────────────
+# ── Prophetic Buffer / Zero-Latency Branching Orchestrator ───────────────────
 _cloud_storyteller = claude if (settings.cloud_provider == "claude" and claude) else gemini
-prophetic_buffer = PropheticBuffer(cache=cache, storyteller=_cloud_storyteller)
+prophetic_buffer = PropheticBuffer(
+    cache=cache,
+    storyteller=_cloud_storyteller,
+    settings=settings,
+)
 
 # ── Janitor (GFS backup + media auto-prune) ───────────────────────────────────
 # Python JanitorService acts as secondary janitor; primary is the Alpine container
@@ -458,16 +462,63 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
         if backchannel:
             active_directives = await backchannel.get_pending_directives(campaign_id)
 
+        # ── Zero-Latency Engine: Speculative Cache Lookup ────────────────────
+        # Attempt to resolve Phase 4 from a pre-computed speculative branch.
+        # The prophetic_buffer pre-generated narrative text for the top-N most
+        # likely actions in the background while the player was deliberating.
+        # On a cache hit we skip the expensive cloud storyteller call entirely.
+        _speculative_hit = False
+        if settings.speculative_engine_enabled:
+            try:
+                _cached_branch = await prophetic_buffer.get_speculative_response(
+                    guild_id=intent.guild_id,
+                    player_input=intent.raw_input,
+                )
+                if _cached_branch:
+                    _outcome_label = resolution.outcome.value.replace("_", " ").title()
+                    narrative = NarrativeResponsePayload(
+                        prompt_id=resolution.intent_id,
+                        intent_id=resolution.intent_id,
+                        narrative=_cached_branch["narrative_text"],
+                        embed_title=f"{context.character.name}: {_outcome_label}",
+                        ambient_audio_key=_cached_branch["ambient_audio_key"] or None,
+                    )
+                    _speculative_hit = True
+                    logger.info(
+                        "Zero-Latency Engine: Phase 4 served from speculative "
+                        "cache (branch=%s intent=%s)",
+                        _cached_branch["label"],
+                        intent.intent_id,
+                    )
+                    await telemetry_svc.emit(
+                        "speculative_cache_hit",
+                        branch=_cached_branch["label"],
+                        intent_id=intent.intent_id,
+                        guild_id=intent.guild_id,
+                        campaign_id=campaign_id,
+                    )
+            except Exception as _sc_exc:
+                logger.debug(
+                    "Speculative cache lookup failed (non-fatal): %s", _sc_exc
+                )
+
         # ── Phase 4: Narrative Generation (with story memory) ─────────────────
-        narrative = await narration.narrate(
-            resolution=resolution,
-            commit=commit,
-            character=context.character,
-            player_intent=intent.raw_input,
-            campaign_system=campaign_system,
-            campaign_id=campaign_id,
-            active_directives=active_directives or None,
-        )
+        if not _speculative_hit:
+            await telemetry_svc.emit(
+                "speculative_cache_miss",
+                intent_id=intent.intent_id,
+                guild_id=intent.guild_id,
+                campaign_id=campaign_id,
+            )
+            narrative = await narration.narrate(
+                resolution=resolution,
+                commit=commit,
+                character=context.character,
+                player_intent=intent.raw_input,
+                campaign_system=campaign_system,
+                campaign_id=campaign_id,
+                active_directives=active_directives or None,
+            )
 
         # ── Consume injected directives ───────────────────────────────────────
         if backchannel and active_directives:
