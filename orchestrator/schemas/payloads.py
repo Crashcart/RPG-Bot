@@ -840,3 +840,288 @@ class GMDirective(BaseModel):
     status:          str  = "pending"    # pending | consumed | cancelled
     submitted_at:    datetime
     consumed_at:     datetime | None = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-Agent Vector-Space Communication — NPC/GM Sync (TDR §2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class EmotionIntentCode(int, Enum):
+    """
+    Lightweight integer dictionary of common RPG emotional / intent states.
+
+    These 4-byte IDs are broadcast on the AgentSyncBus so NPC models can
+    shift their behaviour without requiring full text tokenisation.
+    Ranges: 1–19 combat, 20–39 social, 40–59 environmental, 60–79 player,
+            80–99 world events.
+    """
+    # ── Combat states ─────────────────────────────────────────────────────
+    NEUTRAL        = 0
+    AGGRO          = 1    # NPC has entered combat mode
+    FLEE           = 2    # NPC is trying to escape
+    DEFEND         = 3    # NPC is holding a defensive posture
+    ALLY_DOWN      = 4    # An allied NPC has been defeated
+    STUNNED        = 5    # NPC cannot act this turn
+    ENRAGED        = 6    # NPC has entered berserk mode (attack penalty / damage bonus)
+    SURRENDERING   = 7    # NPC has dropped their weapon
+
+    # ── Social / emotional states ─────────────────────────────────────────
+    CURIOUS        = 20   # NPC is interested in the player
+    SUSPICIOUS     = 21   # NPC senses something is wrong
+    TRUSTING       = 22   # NPC believes the player's story
+    DECEIVED       = 23   # NPC has been successfully bluffed
+    HOSTILE        = 24   # NPC is verbally antagonistic
+    INTIMIDATED    = 25   # NPC is cowering or compliant from fear
+    GRIEVING       = 26   # NPC has suffered a recent loss
+    ELATED         = 27   # NPC is joyful / celebrating
+
+    # ── Environmental awareness ───────────────────────────────────────────
+    DARKNESS       = 40   # Lights out / very low visibility
+    ON_FIRE        = 41   # Area is burning; NPC must account for smoke/heat
+    HAZARD_PRESENT = 42   # Generic environmental hazard nearby
+    SECURE         = 43   # NPC feels safe in current position
+
+    # ── Player-action reactions ───────────────────────────────────────────
+    WEAPON_DRAWN   = 60   # Player has drawn a weapon this turn
+    SPELL_CAST     = 61   # Player cast a spell this turn
+    ITEM_USED      = 62   # Player consumed or deployed an item
+    PERSUADE_ATTEMPT = 63 # Player attempted a social action
+
+    # ── World-scale events ────────────────────────────────────────────────
+    ALARM_RAISED   = 80   # Alarm / reinforcements incoming
+    OBJECTIVE_MET  = 81   # A shared objective was achieved this turn
+    PLOT_REVEALED  = 82   # A major plot secret became known
+
+
+class EmotionHashPayload(BaseModel):
+    """
+    A compact emotion/intent state for a single NPC agent or the GM.
+
+    The AgentSyncBus attaches one of these to every broadcast so receiving
+    NPC models can update their behaviour without parsing prose.
+    """
+    code:        EmotionIntentCode = Field(
+        ...,
+        description="Integer emotion/intent code from EmotionIntentCode",
+    )
+    intensity:   int = Field(
+        default=5,
+        ge=1,
+        le=10,
+        description="Intensity of the emotional state 1 (barely present) – 10 (overwhelming)",
+    )
+    target_id:   str | None = Field(
+        default=None,
+        description="Optional entity ID (NPC or player) that triggered this state",
+    )
+
+
+class EpistemicBoundary(BaseModel):
+    """
+    Knowledge segregation envelope for a single NPC agent (TDR §3 — Epistemic Boundaries).
+
+    Defines what fragments of the SceneStateVector this NPC is allowed to receive.
+    An NPC's knowledge is strictly limited to its immediate sensory radius;
+    it must not receive hidden GM information (cursed items, upcoming traps, etc.).
+    """
+    npc_id:          str  = Field(..., description="Unique NPC identifier (name slug or UUID)")
+    npc_name:        str  = Field(..., description="Display name used in narrative")
+    sensory_radius:  int  = Field(
+        default=30,
+        ge=0,
+        le=300,
+        description="In-world perception radius in feet; determines info cutoff",
+    )
+    knows_player_hp: bool = Field(
+        default=False,
+        description="True only for medic/healer archetypes that can assess injuries",
+    )
+    knows_curses:    bool = Field(
+        default=False,
+        description="True only if NPC has mystical sight (detect magic, etc.)",
+    )
+    allowed_codes:   list[EmotionIntentCode] = Field(
+        default_factory=list,
+        description=(
+            "Subset of EmotionIntentCodes this NPC is allowed to receive. "
+            "Empty list = receive all non-secret codes."
+        ),
+    )
+    fog_of_war:      dict[str, Any] = Field(
+        default_factory=dict,
+        description="Arbitrary per-NPC knowledge exclusions keyed by scene element name",
+    )
+
+
+class SceneStateVector(BaseModel):
+    """
+    Compressed semantic representation of the current scene state (TDR §2-A/B).
+
+    Produced by AgentSyncBus.compress() after every Phase 2 adjudication.
+    The full vector is held by the GM layer; individual NPC agents receive
+    a filtered projection via apply_epistemic_boundary().
+
+    This is NOT a mathematical float vector — it is a structured key-value
+    envelope designed for low-latency serialisation and direct context
+    injection into Ollama NPC prompts (TDR §2-B Step 3).
+    """
+    vector_id:       str  = Field(default_factory=lambda: str(uuid.uuid4()))
+    campaign_id:     str  = Field(..., description="Campaign UUID this vector belongs to")
+    intent_id:       str  = Field(..., description="Intent that triggered this state update")
+
+    # ── Mechanical snapshot ───────────────────────────────────────────────
+    action_type:     str  = Field(..., description="What the player just did")
+    outcome:         ActionOutcome
+    roll_result:     int
+    difficulty:      int
+
+    # ── Emotion/intent hashes — the compressed broadcast payload ──────────
+    gm_emotion:      EmotionHashPayload = Field(
+        ...,
+        description="The GM's internal assessment of the scene mood",
+    )
+    npc_emotions:    list[tuple[str, EmotionHashPayload]] = Field(
+        default_factory=list,
+        description="Per-NPC emotion states: [(npc_id, EmotionHashPayload), ...]",
+    )
+
+    # ── Scene metadata ────────────────────────────────────────────────────
+    active_npcs:     list[str] = Field(
+        default_factory=list,
+        description="NPC IDs present in the current scene",
+    )
+    environment:     str  = Field(
+        default="unknown",
+        description="Current environment type (dungeon, tavern, wilderness, etc.)",
+    )
+    vibe_key:        str  = Field(
+        default="neutral",
+        description="Current VibeStream atmosphere key (tense, spooky, chaotic, etc.)",
+    )
+
+    # ── Hidden GM secrets (never forwarded to NPC agents) ─────────────────
+    gm_secrets:      dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Hidden GM information (traps, curses, NPC motivations, upcoming twists). "
+            "NEVER included in NPCSyncContext payloads broadcast to NPC agents."
+        ),
+    )
+
+    compressed_at:   datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class NPCSyncContext(BaseModel):
+    """
+    The filtered scene state injected directly into an NPC Ollama prompt (TDR §2-B Step 3).
+
+    Produced by AgentSyncBus.apply_epistemic_boundary() — it is the
+    SceneStateVector with all information outside the NPC's EpistemicBoundary
+    stripped away, ready for direct context injection.
+    """
+    npc_id:          str
+    npc_name:        str
+    vector_id:       str  = Field(..., description="Parent SceneStateVector ID")
+    campaign_id:     str
+
+    # ── What this NPC knows ───────────────────────────────────────────────
+    perceived_action: str  = Field(
+        ...,
+        description="What the NPC sensed (may differ from actual action if out of radius)",
+    )
+    perceived_outcome: str = Field(
+        default="",
+        description="What the NPC observed of the outcome",
+    )
+    emotion_state:     EmotionHashPayload = Field(
+        ...,
+        description="This NPC's current emotion/intent hash after state update",
+    )
+    visible_emotions:  list[tuple[str, EmotionHashPayload]] = Field(
+        default_factory=list,
+        description="Emotion hashes of other NPCs this NPC can perceive",
+    )
+    environment:       str = Field(default="unknown")
+    vibe_key:          str = Field(default="neutral")
+
+    injected_at:       datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class VibeStream(BaseModel):
+    """
+    Low-dimensional background atmosphere stream (TDR §3 Option 3).
+
+    Maintained in Redis per campaign so every NPC naturally adapts its
+    dialogue generation to match the room's tone without explicit GM
+    instructions on every line.
+    """
+    campaign_id: str
+    vibe_key:    str = Field(
+        ...,
+        description=(
+            "Current atmospheric label: neutral | tense | spooky | chaotic | "
+            "serene | ominous | celebratory | mournful | combat"
+        ),
+    )
+    intensity:   int = Field(
+        default=5,
+        ge=1,
+        le=10,
+        description="Atmosphere intensity 1 (subtle) – 10 (overwhelming)",
+    )
+    source:      str = Field(
+        default="auto",
+        description="What triggered the vibe update: auto | gm_override | player_action",
+    )
+    updated_at:  datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class HiveMindCombatRequest(BaseModel):
+    """
+    Triggers simultaneous parallel NPC combat turn resolution (TDR §3 Option 2).
+
+    The GM broadcasts the board state to all enemy NPC agents at once;
+    they calculate their moves in parallel and the GM resolves conflicts.
+    Bypasses the sequential one-NPC-at-a-time bottleneck.
+    """
+    campaign_id:  str  = Field(..., description="Campaign UUID")
+    vector_id:    str  = Field(..., description="SceneStateVector ID representing the board state")
+    npc_ids:      list[str] = Field(
+        ...,
+        min_length=1,
+        description="NPC IDs to activate simultaneously",
+    )
+    round_number: int  = Field(default=1, ge=1, description="Combat round number")
+    time_limit_ms: int = Field(
+        default=3000,
+        ge=500,
+        le=30000,
+        description="Hard deadline for NPC deliberation before the GM resolves with partial data",
+    )
+
+
+class HiveMindCombatResult(BaseModel):
+    """
+    Aggregate result of a parallel hive-mind combat resolution pass.
+
+    Each NPC's chosen action is returned alongside any GM conflict resolutions
+    (e.g. two NPCs targeted the same player; the GM adjusts one).
+    """
+    vector_id:    str
+    round_number: int
+    npc_actions:  list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "List of {npc_id, action, target, emotion_state} dicts — "
+            "one per NPC that responded within the time limit"
+        ),
+    )
+    conflicts_resolved: int = Field(
+        default=0,
+        description="Number of targeting conflicts resolved by the GM layer",
+    )
+    timed_out_npcs: list[str] = Field(
+        default_factory=list,
+        description="NPC IDs that did not respond within time_limit_ms; GM uses default action",
+    )
+    resolved_at:  datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
