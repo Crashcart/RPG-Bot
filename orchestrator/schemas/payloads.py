@@ -18,7 +18,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -840,3 +840,49 @@ class GMDirective(BaseModel):
     status:          str  = "pending"    # pending | consumed | cancelled
     submitted_at:    datetime
     consumed_at:     datetime | None = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Map & Fog-of-War Payloads (TDR §3 / §4)
+# Published to NATS and consumed by the map-renderer service.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CoordinateUpdatePayload(BaseModel):
+    """
+    NATS subject: map.update.<campaign_id>
+
+    Published by FogOfWarService.update_position() whenever a player or NPC
+    token moves on the grid.  Consumed by the map-renderer to re-render the
+    campaign PNG and update Redis FoW state.
+    """
+    campaign_id:    str = Field(..., description="Campaign UUID")
+    entity_id:      str = Field(..., description="Discord user ID or NPC identifier")
+    entity_type:    Literal["player", "npc", "object"] = Field(default="player")
+    x:              int = Field(..., ge=0, description="Grid column (0-based)")
+    y:              int = Field(..., ge=0, description="Grid row (0-based)")
+    token:          str = Field(default="", description="1-2 char token label for the map")
+    reveal_radius:  int = Field(default=3, ge=0, le=10, description="FoW reveal radius in tiles")
+
+
+class FogRevealPayload(BaseModel):
+    """
+    NATS subject: map.reveal.<campaign_id>
+
+    Reveals an explicit set of flat grid-cell indices (row * cols + col) for
+    a campaign — used by the GM to reveal rooms, corridors, or area-of-effect
+    zones without moving a token.
+    """
+    campaign_id: str        = Field(..., description="Campaign UUID")
+    cells:       list[int]  = Field(default_factory=list, description="Flat cell indices to reveal")
+
+
+class MapStatePayload(BaseModel):
+    """
+    Snapshot of the current Fog-of-War and token positions for a campaign.
+    Returned by GET /api/map/{campaign_id} and used by the Discord bot to
+    attach the rendered PNG to a narrative embed.
+    """
+    campaign_id:    str                         = Field(..., description="Campaign UUID")
+    revealed_cells: list[int]                   = Field(default_factory=list)
+    positions:      dict[str, dict[str, Any]]   = Field(default_factory=dict)
+    map_png_url:    str                         = Field(..., description="HTTP URL of the rendered PNG")

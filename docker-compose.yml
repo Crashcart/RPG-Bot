@@ -58,6 +58,9 @@ services:
       - OLLAMA_HOST=http://brain:11434
       - CHROMA_HOST=ironclad-chroma
       - MEDIA_PROXY_URL=http://media-proxy:8001
+      - NATS_HOST=aetheris-nats
+      - NATS_PORT=4222
+      - MAP_RENDERER_URL=http://aetheris-map:3001
       - PDF_UPLOAD_DIR=/app/pdf_uploads
       - WORLD_DATA_DIR=/app/data
       - LOGS_DIR=/app/logs
@@ -71,6 +74,8 @@ services:
         condition: service_started
       ironclad-chroma:
         condition: service_started
+      aetheris-nats:
+        condition: service_healthy
     volumes:
       - ./data:/app/data          # shared global data (TDR §2)
       - ./logs:/app/logs          # structured logs
@@ -145,9 +150,10 @@ services:
       - BACKUP_INTERVAL_HOURS=24
       - PRUNE_INTERVAL_HOURS=6
 
-  # ── PostgreSQL Database ─────────────────────────────────────────────────────
+  # ── PostgreSQL Database (pgvector) ─────────────────────────────────────────
+  # Uses pgvector/pgvector:pg16 for built-in vector similarity search (TDR §2).
   ironclad-db:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: aetheris-db
     restart: unless-stopped
     networks:
@@ -274,3 +280,56 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # ── NATS Message Bus (TDR §3) ───────────────────────────────────────────────
+  # Multi-agent pub/sub for GM ↔ NPC ↔ map-renderer communication.
+  # Internal only — not exposed to the public internet.
+  aetheris-nats:
+    image: nats:2-alpine
+    container_name: aetheris-nats
+    restart: unless-stopped
+    networks:
+      - aetheris_net
+    # Enable HTTP monitoring on port 8222 (internal) for the healthcheck.
+    command: ["--http_port", "8222"]
+    # No external port mapping — scribe and map-renderer connect via internal network.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz | grep -q ok"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Map Renderer (TDR §4 Option 2) ─────────────────────────────────────────
+  # Alpine/Node.js service. Subscribes to NATS for coordinate updates,
+  # renders the Fog-of-War PNG in RAM using canvas, and caches the result in
+  # Redis. Served to the Discord bot via GET /map/<campaign_id>.
+  aetheris-map:
+    build:
+      context: ./map-renderer
+      dockerfile: Dockerfile
+    container_name: aetheris-map
+    restart: unless-stopped
+    networks:
+      - aetheris_net
+      - aetheris_store
+    environment:
+      - NATS_URL=nats://aetheris-nats:4222
+      - REDIS_HOST=ironclad-cache
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD required}
+      - MAP_RENDERER_PORT=3001
+      - MAP_TILE_SIZE=32
+      - MAP_COLS=20
+      - MAP_ROWS=20
+    depends_on:
+      aetheris-nats:
+        condition: service_healthy
+      ironclad-cache:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health | grep -q ok"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
