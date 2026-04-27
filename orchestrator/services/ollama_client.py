@@ -16,6 +16,7 @@ from orchestrator.prompts.guardrails import (
 )
 from orchestrator.schemas.payloads import (
     ActionOutcome,
+    ActionCategory,
     CharacterSnapshot,
     ContextAssemblyPayload,
     DiceRequest,
@@ -142,7 +143,7 @@ class OllamaClient:
             logger.error("Ollama returned non-JSON content: %s", content[:500])
             raise ValueError(f"Ollama output is not valid JSON: {exc}") from exc
 
-        return self._build_resolution(context.intent_id, payload_dict)
+        return self._build_resolution(context.intent_id, payload_dict, context.action_category)
 
     # Fields stripped from item_data before it is shown to Ollama.
     # Flavor text in these fields can confuse the mechanical engine.
@@ -205,6 +206,7 @@ class OllamaClient:
 
         return (
             f"ACTIVE SYSTEM: {char.system}\n\n"
+            f"ACTION CATEGORY: {ctx.action_category.value}\n\n"
             f"{rolling_block}"
             f"CHARACTER STATE:\n{json.dumps(char.stats, indent=2)}\n\n"
             f"INVENTORY (mechanical fields only):\n{inventory_text}\n"
@@ -215,7 +217,7 @@ class OllamaClient:
         )
 
     def _build_resolution(
-        self, intent_id: str, d: dict
+        self, intent_id: str, d: dict, action_category: ActionCategory = ActionCategory.UNKNOWN
     ) -> OllamaResolutionPayload:
         """Parse the LLM JSON output and inject the true dice roll."""
         dice_req = DiceRequest(
@@ -262,9 +264,22 @@ class OllamaClient:
             vehicle_deltas=vehicle_deltas,
         )
 
+        # Resolve the action category: prefer the LLM echo, fall back to the
+        # pre-classified category supplied by the ingestion phase.
+        try:
+            resolved_category = ActionCategory(d.get("action_category", action_category.value))
+        except ValueError:
+            resolved_category = action_category
+
+        # Stealth detection flag — only meaningful when action_category == STEALTH.
+        # The backend accepts what the mechanical engine returned; if omitted the
+        # field defaults to False (character remains hidden).
+        is_detected: bool = bool(d.get("is_detected", False))
+
         return OllamaResolutionPayload(
             intent_id=intent_id,
             action_type=d.get("action_type", "unknown"),
+            action_category=resolved_category,
             difficulty=int(d.get("difficulty", 10)),
             dice_request=dice_req,
             roll_result=roll_result,
@@ -272,6 +287,7 @@ class OllamaClient:
             state_delta=delta,
             rulebook_citations=d.get("rulebook_citations", []),
             reasoning=d.get("reasoning", ""),
+            is_detected=is_detected,
         )
 
     # ── Local Narrative Generation ─────────────────────────────────────────────
@@ -294,6 +310,7 @@ class OllamaClient:
         # Build the mechanical truth block Ollama must honour
         mechanical_truth_json = json.dumps({
             "action_type":        truth.action_type,
+            "action_category":    truth.action_category.value,
             "difficulty":         truth.difficulty,
             "dice_notation":      truth.dice_notation,
             "roll_result":        truth.roll_result,
@@ -301,6 +318,7 @@ class OllamaClient:
             "stat_changes":       [s.model_dump() for s in truth.stat_changes],
             "status_change":      truth.status_change.value if truth.status_change else None,
             "rulebook_citations": truth.rulebook_citations,
+            "is_hidden":          truth.is_hidden,
         }, indent=2)
 
         # Build story context lines

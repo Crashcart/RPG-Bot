@@ -666,13 +666,20 @@ def _format_mechanical_context(resolution: OllamaResolutionPayload) -> str:
         if resolution.state_delta.status_change else ""
     )
 
+    stealth_line = ""
+    if resolution.action_category.value == "stealth":
+        stealth_line = (
+            f"\nStealth: {'DETECTED — character is spotted' if resolution.is_detected else 'HIDDEN — character remains undetected'}"
+        )
+
     return (
-        f"Action type: {resolution.action_type}\n"
+        f"Action type: {resolution.action_type} (category: {resolution.action_category.value})\n"
         f"Roll: {resolution.dice_request.notation} → {resolution.roll_result} "
         f"(DC {resolution.difficulty}) → {resolution.outcome.value}\n"
         f"Stat changes:\n{stat_block}\n"
         f"Inventory changes:\n{inv_block}\n"
         f"{status_line}"
+        f"{stealth_line}"
     ).strip()
 
 
