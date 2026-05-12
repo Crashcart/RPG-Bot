@@ -23,9 +23,9 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 # Shared Enumerations
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 
 class CommandType(str, Enum):
     ACTION        = "action"          # free-text narrative action
@@ -59,9 +59,9 @@ class OperationalStatus(str, Enum):
     DESTROYED   = "DESTROYED"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 # Phase 1 – Ingestion Schema: Discord → Orchestrator
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 
 class SlashCommandData(BaseModel):
     """Structured data for Discord slash commands."""
@@ -171,9 +171,9 @@ class ContextAssemblyPayload(BaseModel):
     assembled_at:       datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 # Phase 2 – Mechanical Adjudication Schema: Ollama → Orchestrator
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 
 class DiceRequest(BaseModel):
     """
@@ -238,6 +238,19 @@ class StateDelta(BaseModel):
     )
 
 
+class HiddenStateDelta(BaseModel):
+    """
+    Hidden psychological state changes for the Whisper Protocol.
+    Applied atomically to the hidden_state JSONB column in Phase 3.
+    Ollama populates this when a horror/paranoia trigger is present in the scene.
+    """
+    sanity_drain:    int       = Field(default=0, description="Sanity points lost this turn (positive = drain)")
+    flags_add:       list[str] = Field(default_factory=list, description="Psychological flags to set")
+    flags_remove:    list[str] = Field(default_factory=list, description="Psychological flags to clear")
+    trigger_whisper: bool      = Field(default=False, description="Whether to deliver a whisper this turn")
+    trigger_reason:  str       = Field(default="", description="Why the whisper was triggered")
+
+
 class OllamaResolutionPayload(BaseModel):
     """
     Phase 2 output – the strictly mechanical result from the local LLM.
@@ -251,6 +264,11 @@ class OllamaResolutionPayload(BaseModel):
     roll_result:        int  = Field(..., description="Final total after modifiers")
     outcome:            ActionOutcome
     state_delta:        StateDelta
+    hidden_state_delta: HiddenStateDelta | None = Field(
+        default=None,
+        description="Optional psychological state mutation for the Whisper Protocol. "
+                    "Populated by Ollama when horror/paranoia triggers are present.",
+    )
     rulebook_citations: list[str]  = Field(default_factory=list)
     reasoning:          str        = Field(
         default="",
@@ -285,15 +303,16 @@ class OllamaResolutionPayload(BaseModel):
                 "status_change": None,
                 "inventory_delta": [],
             },
+            "hidden_state_delta": None,
             "rulebook_citations": ["PHB p.194 – Melee Attack"],
             "reasoning": "Attack roll 18 meets AC 15. Damage: 1d8+3 = 8.",
         }
     }}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 # Phase 3 – State Commitment Schema
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 
 class StateCommitPayload(BaseModel):
     """
@@ -313,9 +332,9 @@ class StateCommitPayload(BaseModel):
     committed_at:   datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 # Story Memory Schemas (used in Phase 4 for continuity)
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 
 class StoryEntityType(str, Enum):
     NPC          = "npc"
@@ -352,9 +371,9 @@ class ExtractionResult(BaseModel):
     facts: list[ExtractedFact] = Field(default_factory=list)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 # Phase 4 – Narrative Generation Schema: Orchestrator → Gemini → Discord
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 
 class MechanicalTruth(BaseModel):
     """
@@ -398,9 +417,9 @@ class MultimediaCue(BaseModel):
     label:      str = ""
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 # Task 4 — Living Discord Immersion Layer Schemas
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 
 class ThreadEvent(str, Enum):
     """
@@ -517,7 +536,7 @@ class NarrativeResponsePayload(BaseModel):
                     "that no one else in the scene would catch. 2-3 sentences.",
     )
 
-    # ── Task 4: Ghost Sheet / Ephemeral Thread ────────────────────────────
+    # ── Task 4: Ghost Sheet / Ephemeral Thread ────────────────────────
     thread_event:   ThreadEvent | None = Field(
         default=None,
         description="If set, the bot manages a combat/encounter thread on this message.",
@@ -532,7 +551,7 @@ class NarrativeResponsePayload(BaseModel):
                     "inventory changes, rulebook citations. Never shown in main channel.",
     )
 
-    # ── Task 4: Voice Channel Puppeteering ────────────────────────────────
+    # ── Task 4: Voice Channel Puppeteering ──────────────────────────
     ambient_audio_key: str | None = Field(
         default=None,
         description="Key for the ambient audio file to loop in the voice channel "
@@ -544,14 +563,14 @@ class NarrativeResponsePayload(BaseModel):
                     "each with its Ollama node's unique voice profile.",
     )
 
-    # ── Task 4: Channel Manipulation ─────────────────────────────────────
+    # ── Task 4: Channel Manipulation ───────────────────────────────
     channel_directive: ChannelDirective | None = Field(
         default=None,
         description="If set, the bot moves the player's Discord channel access — "
                     "into the dungeon, prison, hospital, or back to main.",
     )
 
-    # ── Driftnet: World-bound broadcast channel ───────────────────────────
+    # ── Driftnet: World-bound broadcast channel ───────────────────────
     driftnet_channel_id: str = Field(
         default="",
         description=(
@@ -561,7 +580,7 @@ class NarrativeResponsePayload(BaseModel):
         ),
     )
 
-    # ── Multimedia: Music, SFX, Images, Handouts ─────────────────────────
+    # ── Multimedia: Music, SFX, Images, Handouts ──────────────────────
     sfx_cues: list[SFXCue] = Field(
         default_factory=list,
         description="Ordered list of one-shot SFX to play after the narrative lands.",
@@ -592,9 +611,9 @@ class NarrativeResponsePayload(BaseModel):
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 # GM Director Schemas (Task 3 — Two-Tier Storyteller Architecture)
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 
 class SubAgentTask(BaseModel):
     """
@@ -653,9 +672,9 @@ class SubAgentResult(BaseModel):
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 # Top-Level Pipeline Result (persisted to action_log)
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 
 class PipelineResult(BaseModel):
     """
@@ -669,11 +688,11 @@ class PipelineResult(BaseModel):
     pipeline_duration_ms: int = 0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 # Async Session Feature Schemas
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 
-# ── Chronicle Recap ───────────────────────────────────────────────────────────
+# ── Chronicle Recap ───────────────────────────────────────────────────────────────
 
 class RecapRequest(BaseModel):
     """
@@ -700,7 +719,7 @@ class RecapResponse(BaseModel):
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-# ── Campfire Mode ─────────────────────────────────────────────────────────────
+# ── Campfire Mode ─────────────────────────────────────────────────────────────────
 
 class PresenceUpdate(BaseModel):
     """Posted by the Discord bot whenever a player's online status changes."""
@@ -724,7 +743,7 @@ class CampfireStatus(BaseModel):
     checked_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-# ── Async Downtime Tasks ──────────────────────────────────────────────────────
+# ── Async Downtime Tasks ───────────────────────────────────────────────────────────
 
 class DowntimeSubmitRequest(BaseModel):
     """
@@ -771,7 +790,7 @@ class DowntimePendingNotification(BaseModel):
     character_name:   str = ""
 
 
-# ── Retcon ────────────────────────────────────────────────────────────────────
+# ── Retcon ──────────────────────────────────────────────────────────────────────────
 
 class RetconRequest(BaseModel):
     """
@@ -791,9 +810,9 @@ class RetconResponse(BaseModel):
     retconned_at:    datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 # Admin Backchannel Schemas
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 
 class DirectiveType(str, Enum):
     SCENE_DIRECTIVE = "scene_directive"   # trigger env event next scene
