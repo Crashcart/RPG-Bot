@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     from orchestrator.services.story_memory          import StoryMemoryService
     from orchestrator.services.sub_agent_dispatcher  import SubAgentDispatcher
     from orchestrator.services.telemetry             import TelemetryService
+    from orchestrator.services.whisper_service       import WhisperService
     from orchestrator.services.world_registry        import WorldRegistry
 
 import asyncio
@@ -149,6 +150,7 @@ class GMDirector:
         elevenlabs:     "ElevenLabsClient | None" = None,
         handout_svc:    "HandoutService | None" = None,
         faction_svc:    "FactionService | None" = None,
+        whisper_svc:    "WhisperService | None" = None,
         db=None,
     ) -> None:
         self._gemini         = gemini
@@ -165,9 +167,10 @@ class GMDirector:
         self._elevenlabs     = elevenlabs
         self._handout_svc    = handout_svc
         self._faction_svc    = faction_svc
+        self._whisper_svc    = whisper_svc
         self._db             = db
 
-    # ── Public Interface ───────────────────────────────────────────────────────
+    # ── Public Interface ────────────────────────────────────────────────────────
 
     async def narrate(
         self,
@@ -224,7 +227,7 @@ class GMDirector:
                 storyteller=storyteller_name,
             )
 
-        # ── Inject multimedia sub-tasks into the plan ─────────────────────────
+        # ── Inject multimedia sub-tasks into the plan ───────────────────────
         scene_brief = f"{resolution.action_type} — {player_intent[:120]}"
         tone = "gritty"
 
@@ -273,7 +276,7 @@ class GMDirector:
 
         assembled_elements = _format_assembled_elements(sub_results)
 
-        # ── Step 4c: Synthesis Pass + Whisper (concurrent) ────────────────────
+        # ── Step 4c: Synthesis Pass + Whisper (concurrent) ──────────────────
         mech_context = _format_mechanical_context(resolution)
         stat_block   = _build_stat_change_block(resolution)
         story_block  = (
@@ -304,7 +307,7 @@ class GMDirector:
         if self._telemetry:
             await self._telemetry.emit("synthesis_start", storyteller=storyteller_name)
 
-        # ── Inject dynamic world tone + capture driftnet channel ─────────────
+        # ── Inject dynamic world tone + capture driftnet channel ──────────────
         # Prepend orchestrator self-awareness context so the GM Director knows
         # it commands Lyria, ElevenLabs, ImageGen, and sub-agent AIs.
         synthesis_system  = GM_DIRECTOR_ORCHESTRATOR_CONTEXT + GM_SYSTEM_PROMPT
@@ -325,15 +328,34 @@ class GMDirector:
             except Exception as _wt_exc:
                 logger.debug("World tone injection failed (non-fatal): %s", _wt_exc)
 
-        has_npc_tasks = any(r.task.task_type == "npc_dialogue" for r in sub_results)
+        # ── Whisper trigger evaluation ─────────────────────────────────────────
+        # NPC dialogue tasks always warrant a whisper (original behaviour).
+        # WhisperService extends the trigger to horror actions and low sanity
+        # independently of whether any NPC tasks are present.
+        has_npc_tasks  = any(r.task.task_type == "npc_dialogue" for r in sub_results)
+        should_whisper = has_npc_tasks
+        hidden_context = ""
+        if self._whisper_svc:
+            triggered, hidden_state = await self._whisper_svc.should_trigger_whisper(
+                character_id=character.character_id,
+                action_type=resolution.action_type,
+                reasoning=resolution.reasoning,
+                outcome=resolution.outcome.value,
+            )
+            if triggered:
+                should_whisper = True
+                hidden_context = self._whisper_svc.build_hidden_context(hidden_state)
+
         synthesis_coro = storyteller.generate(
             system_prompt=synthesis_system,
             user_prompt=synthesis_prompt,
             max_tokens=_SYNTHESIS_MAX_TOKENS,
         )
         whisper_coro = (
-            self._generate_whisper(storyteller, resolution, plan, sub_results, player_intent)
-            if has_npc_tasks else asyncio.sleep(0, result=None)
+            self._generate_whisper(
+                storyteller, resolution, plan, sub_results, player_intent, hidden_context
+            )
+            if should_whisper else asyncio.sleep(0, result=None)
         )
 
         raw_narrative, whisper_text = await asyncio.gather(synthesis_coro, whisper_coro)
@@ -356,7 +378,7 @@ class GMDirector:
                 stripped_count, storyteller_name,
             )
 
-        # ── Step 4e: Paradox Engine (unreliable narrator injection) ───────────
+        # ── Step 4e: Paradox Engine (unreliable narrator injection) ────────────
         if self._paradox_engine and self._reality_wall:
             try:
                 paradox_level = await self._reality_wall.get_paradox_level(campaign_id)
@@ -371,7 +393,7 @@ class GMDirector:
             except Exception as px_exc:
                 logger.debug("Paradox Engine failed (non-fatal): %s", px_exc)
 
-        # ── Persist New World Facts (best-effort) ──────────────────────────────
+        # ── Persist New World Facts (best-effort) ─────────────────────────────
         try:
             await self._story_memory.extract_and_store(
                 narrative=final_narrative,
@@ -381,7 +403,7 @@ class GMDirector:
         except Exception as exc:
             logger.warning("GM Director: fact extraction failed (best-effort): %s", exc)
 
-        # ── Task 4: Living Discord Immersion fields ────────────────────────────
+        # ── Task 4: Living Discord Immersion fields ───────────────────────────
         tts_cues      = _build_tts_cues(sub_results)
         thread_ev, thread_title, thread_body = _build_thread_event(resolution, character.name)
         ambient_key   = _infer_ambient_audio_key(resolution)
@@ -396,7 +418,7 @@ class GMDirector:
             if ch_action else None
         )
 
-        # ── Multimedia: SFX, Music, Scene Image ───────────────────────────────
+        # ── Multimedia: SFX, Music, Scene Image ──────────────────────────────
         sfx_cues: list[SFXCue] = []
         scene_image_prompt: str | None = None
 
@@ -476,21 +498,23 @@ class GMDirector:
             npc_portrait_name=plan.trigger_npc_portrait,
         )
 
-    # ── Private: Whisper Generation ───────────────────────────────────────────
+    # ── Private: Whisper Generation ─────────────────────────────────────────────
 
     async def _generate_whisper(
         self,
         storyteller,
-        resolution:    OllamaResolutionPayload,
-        plan:          GMPlanResult,
+        resolution:     OllamaResolutionPayload,
+        plan:           GMPlanResult,
         sub_results,
-        player_intent: str,
+        player_intent:  str,
+        hidden_context: str = "",
     ) -> str | None:
         """
         Generate the secret private-perception DM whisper in parallel with synthesis.
 
-        Fires only when NPC dialogue sub-tasks are present.  A failed whisper
-        silently returns None — the main narrative is unaffected.
+        Fires when NPC dialogue sub-tasks are present OR when WhisperService
+        determines a horror/sanity trigger is active.  A failed whisper silently
+        returns None — the main narrative is unaffected.
         """
         npc_names = ", ".join(
             r.task.entity_name for r in sub_results
@@ -503,6 +527,9 @@ class GMDirector:
             npc_list=npc_names or "unspecified NPC",
             mechanical_outcome=outcome_str,
         )
+        if hidden_context:
+            whisper_prompt = hidden_context + "\n\n" + whisper_prompt
+
         try:
             text = await storyteller.generate(
                 system_prompt=WHISPER_SYSTEM_PROMPT,
@@ -514,7 +541,7 @@ class GMDirector:
             logger.debug("Whisper generation failed (non-fatal): %s", exc)
             return None
 
-    # ── Private: Storyteller Selection ────────────────────────────────────────
+    # ── Private: Storyteller Selection ─────────────────────────────────────────
 
     async def _select_storyteller(self):
         """
@@ -545,7 +572,7 @@ class GMDirector:
 
         return local
 
-    # ── Private: Planning Pass ─────────────────────────────────────────────────
+    # ── Private: Planning Pass ───────────────────────────────────────────────
 
     async def _planning_pass(
         self,
@@ -602,7 +629,7 @@ class GMDirector:
             return GMPlanResult(sub_tasks=[], direct_elements=["full scene"])
 
 
-# ── Private Helpers ────────────────────────────────────────────────────────────
+# ── Private Helpers ──────────────────────────────────────────────────────────────
 
 def _extract_npc_list(resolution: OllamaResolutionPayload) -> str:
     """
@@ -751,7 +778,7 @@ def _strip_structural_text(text: str) -> tuple[str, int]:
     return text, stripped
 
 
-# ── Task 4 Helper Functions ────────────────────────────────────────────────────
+# ── Task 4 Helper Functions ────────────────────────────────────────────────────────
 
 def _build_tts_cues(sub_results) -> list[TTSCue]:
     """
@@ -834,7 +861,7 @@ def _infer_ambient_audio_key(resolution: OllamaResolutionPayload) -> str | None:
     return None
 
 
-# ── Multimedia Helper Functions ────────────────────────────────────────────────
+# ── Multimedia Helper Functions ──────────────────────────────────────────────────────
 
 def _parse_sfx_cues(raw_output: str) -> list[SFXCue]:
     """
