@@ -107,7 +107,7 @@ class DatabaseService:
             "settings": json.loads(row["settings"]) if isinstance(row["settings"], str) else dict(row["settings"]),
         }
 
-    # ── State Commitment ──────────────────────────────────────────────────────
+    # ── State Commitment ─────────────────────────────────────────────────────
 
     async def apply_state_delta(self, delta: StateDelta) -> dict[str, Any]:
         """
@@ -210,6 +210,83 @@ class DatabaseService:
 
                 return stats
 
+    # ── Whisper Protocol ──────────────────────────────────────────────────────
+
+    async def get_hidden_state(self, character_id: str) -> dict[str, Any]:
+        """Fetch the hidden psychological state for a character."""
+        row = await self.pool.fetchrow(
+            "SELECT hidden_state FROM characters WHERE id = $1",
+            UUID(character_id),
+        )
+        if not row:
+            return {}
+        raw = row["hidden_state"]
+        return json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+
+    async def apply_hidden_state_delta(
+        self,
+        character_id:  str,
+        sanity_drain:  int = 0,
+        flags_add:     list[str] | None = None,
+        flags_remove:  list[str] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Atomically apply a hidden psychological state mutation.
+        Returns the post-commit hidden_state dict.
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "SELECT hidden_state FROM characters WHERE id = $1 FOR UPDATE",
+                    UUID(character_id),
+                )
+                if not row:
+                    raise ValueError(f"Character {character_id} not found.")
+
+                raw = row["hidden_state"]
+                state = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+
+                if sanity_drain:
+                    state["sanity"] = max(0, int(state.get("sanity", 100)) - sanity_drain)
+
+                flags: list[str] = list(state.get("flags", []))
+                for f in (flags_add or []):
+                    if f not in flags:
+                        flags.append(f)
+                for f in (flags_remove or []):
+                    if f in flags:
+                        flags.remove(f)
+                state["flags"] = flags
+
+                await conn.execute(
+                    "UPDATE characters SET hidden_state = $1, updated_at = NOW() WHERE id = $2",
+                    json.dumps(state),
+                    UUID(character_id),
+                )
+                return state
+
+    async def log_whisper(
+        self,
+        character_id: str,
+        intent_id:    str,
+        trigger:      str,
+        delta:        dict[str, Any],
+        whisper_text: str | None = None,
+    ) -> None:
+        """Record a whisper delivery event for audit purposes."""
+        await self.pool.execute(
+            """
+            INSERT INTO whisper_log
+                (character_id, intent_id, trigger, delta, whisper_text)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            UUID(character_id),
+            UUID(intent_id),
+            trigger,
+            json.dumps(delta),
+            whisper_text,
+        )
+
     async def log_action(self, record: dict[str, Any]) -> None:
         await self.pool.execute(
             """
@@ -229,7 +306,7 @@ class DatabaseService:
             record.get("narrative_summary", "")[:500],
         )
 
-    # ── Web UI Queries ────────────────────────────────────────────────────────
+    # ── Web UI Queries ─────────────────────────────────────────────────────────
 
     async def get_all_campaigns(self) -> list[dict[str, Any]]:
         rows = await self.pool.fetch(
@@ -561,7 +638,7 @@ class DatabaseService:
         )
         return dict(row) if row else {}
 
-    # ── Node Registry ─────────────────────────────────────────────────────────
+    # ── Node Registry ─────────────────────────────────────────────────────────────
 
     async def get_all_nodes(self) -> list[dict[str, Any]]:
         rows = await self.pool.fetch(
@@ -692,7 +769,7 @@ class DatabaseService:
             latency_ms, node_name,
         )
 
-    # ── System Settings ────────────────────────────────────────────────────────
+    # ── System Settings ─────────────────────────────────────────────────────────
 
     async def get_system_setting(self, key: str, default: Any = None) -> Any:
         """Fetch a global system setting by key. Returns parsed Python value."""
@@ -772,7 +849,7 @@ class DatabaseService:
             UUID(node_id),
         )
 
-    # ── Lore CRUD ─────────────────────────────────────────────────────────────
+    # ── Lore CRUD ───────────────────────────────────────────────────────────────────────────
 
     async def upsert_story_fact(
         self,
@@ -806,7 +883,7 @@ class DatabaseService:
             UUID(campaign_id), entity_type, entity_name,
         )
 
-    # ── Rule Registry ─────────────────────────────────────────────────────────
+    # ── Rule Registry ─────────────────────────────────────────────────────────────
 
     async def get_active_rule_modules(self, campaign_id: str) -> list[dict[str, Any]]:
         rows = await self.pool.fetch(
