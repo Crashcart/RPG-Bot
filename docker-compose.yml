@@ -44,13 +44,13 @@ services:
     build:
       context: ./orchestrator
       dockerfile: Dockerfile
-    container_name: aetheris-scribe
+    container_name: ${PROJECT_PREFIX:-aetheris}-scribe
     restart: unless-stopped
     networks:
       - aetheris_net
       - aetheris_store
     ports:
-      - "8000:8000"
+      - "${APP_HOST_PORT:-8000}:8000"
     env_file: .env
     environment:
       - DB_HOST=ironclad-db
@@ -89,7 +89,7 @@ services:
     build:
       context: ./discord-bot
       dockerfile: Dockerfile
-    container_name: aetheris-discord
+    container_name: ${PROJECT_PREFIX:-aetheris}-discord
     restart: unless-stopped
     networks:
       - aetheris_net
@@ -103,7 +103,7 @@ services:
   # ── Brain (Ollama — Local AI, Intel GPU) ──────────────────────────────────────
   brain:
     image: ollama/ollama:latest
-    container_name: aetheris-brain
+    container_name: ${PROJECT_PREFIX:-aetheris}-brain
     restart: unless-stopped
     networks:
       - aetheris_net
@@ -129,7 +129,7 @@ services:
     build:
       context: ./janitor
       dockerfile: Dockerfile
-    container_name: aetheris-janitor
+    container_name: ${PROJECT_PREFIX:-aetheris}-janitor
     restart: unless-stopped
     networks:
       - aetheris_net
@@ -148,7 +148,7 @@ services:
   # ── PostgreSQL Database ─────────────────────────────────────────────────────
   ironclad-db:
     image: postgres:16-alpine
-    container_name: aetheris-db
+    container_name: ${PROJECT_PREFIX:-aetheris}-db
     restart: unless-stopped
     networks:
       - aetheris_store
@@ -169,7 +169,7 @@ services:
   # ── Redis Session Cache ─────────────────────────────────────────────────────
   ironclad-cache:
     image: redis:7-alpine
-    container_name: aetheris-cache
+    container_name: ${PROJECT_PREFIX:-aetheris}-cache
     restart: unless-stopped
     networks:
       - aetheris_store
@@ -187,7 +187,7 @@ services:
     build:
       context: ./csv-sync
       dockerfile: Dockerfile
-    container_name: aetheris-csv-sync
+    container_name: ${PROJECT_PREFIX:-aetheris}-csv-sync
     restart: unless-stopped
     networks:
       - aetheris_store
@@ -206,7 +206,7 @@ services:
   # ── ChromaDB Vector Store (RAG) ─────────────────────────────────────────────
   ironclad-chroma:
     image: chromadb/chroma:latest
-    container_name: aetheris-chroma
+    container_name: ${PROJECT_PREFIX:-aetheris}-chroma
     restart: unless-stopped
     networks:
       - aetheris_net
@@ -222,12 +222,12 @@ services:
     build:
       context: ./media-proxy
       dockerfile: Dockerfile
-    container_name: aetheris-media
+    container_name: ${PROJECT_PREFIX:-aetheris}-media
     restart: unless-stopped
     networks:
       - aetheris_net
     ports:
-      - "8001:8001"
+      - "${MEDIA_PROXY_PORT:-8001}:8001"
     volumes:
       - media-assets:/app/assets
 
@@ -237,13 +237,13 @@ services:
     build:
       context: ./health-sentinel
       dockerfile: Dockerfile
-    container_name: aetheris-pulse
+    container_name: ${PROJECT_PREFIX:-aetheris}-pulse
     restart: unless-stopped
     networks:
       - aetheris_net
       - aetheris_store
     ports:
-      - "58291:58291"
+      - "${PULSE_PORT:-58291}:58291"
     env_file: .env
     environment:
       - REDIS_HOST=ironclad-cache
@@ -259,7 +259,7 @@ services:
   # ── Lavalink Audio Engine ───────────────────────────────────────────────────
   lavalink-audio:
     image: ghcr.io/lavalink-devs/lavalink:4
-    container_name: aetheris-lavalink
+    container_name: ${PROJECT_PREFIX:-aetheris}-lavalink
     restart: unless-stopped
     networks:
       - aetheris_net

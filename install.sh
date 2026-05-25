@@ -9,9 +9,9 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BO
 REPO_URL="https://github.com/Crashcart/RPG-Bot.git"
 REPO_DIR="RPG-Bot"
 
-log()   { echo -e "${GREEN}[\u2713]${NC} $*"; }
+log()   { echo -e "${GREEN}[✓]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
-error() { echo -e "${RED}[\u2717]${NC} $*" >&2; exit 1; }
+error() { echo -e "${RED}[✗]${NC} $*" >&2; exit 1; }
 info()  { echo -e "${CYAN}[→]${NC} $*"; }
 
 echo ""
@@ -102,7 +102,7 @@ else
     log ".env configured"
 fi
 
-# Load env vars for use in migration step (POSTGRES_USER, POSTGRES_DB, OLLAMA_MODEL)
+# Load env vars for use in migration step (POSTGRES_USER, POSTGRES_DB, OLLAMA_MODEL, PROJECT_PREFIX)
 set -a
 # shellcheck source=/dev/null
 source .env 2>/dev/null || true
@@ -120,9 +120,9 @@ log "All services started"
 # =============================================================================
 info "Waiting for database to become healthy..."
 TIMEOUT=120; ELAPSED=0; INTERVAL=5
-until docker inspect --format='{{.State.Health.Status}}' aetheris-db 2>/dev/null | grep -q 'healthy'; do
+until docker inspect --format='{{.State.Health.Status}}' "${PROJECT_PREFIX:-aetheris}-db" 2>/dev/null | grep -q 'healthy'; do
     if [[ $ELAPSED -ge $TIMEOUT ]]; then
-        error "Database did not become healthy within ${TIMEOUT}s. Check: docker logs aetheris-db"
+        error "Database did not become healthy within ${TIMEOUT}s. Check: docker logs ${PROJECT_PREFIX:-aetheris}-db"
     fi
     sleep $INTERVAL
     ELAPSED=$((ELAPSED + INTERVAL))
@@ -177,9 +177,9 @@ echo -e "${GREEN}${BOLD}╔═════════════════�
 echo -e "${GREEN}${BOLD}║     ✓  Ironclad GM is running!                       ║${NC}"
 echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo "  Web Admin (White Portal):  http://localhost:8000/web/"
-echo "  Health Pulse:              http://localhost:58291/"
-echo "  Media Proxy:               http://localhost:8001/"
+echo "  Web Admin (White Portal):  http://localhost:${APP_HOST_PORT:-8000}/web/"
+echo "  Health Pulse:              http://localhost:${PULSE_PORT:-58291}/"
+echo "  Media Proxy:               http://localhost:${MEDIA_PROXY_PORT:-8001}/"
 echo ""
 echo "  Next steps:"
 echo "    1. Invite your Discord bot to your server"
@@ -189,5 +189,6 @@ echo ""
 echo "  Useful commands:"
 echo "    View logs:   $DC logs -f"
 echo "    Stop:        $DC down"
+echo "    Deploy:      ./deploy.sh  (runs pre-flight check before starting)"
 echo "    Uninstall:   bash <(curl -fsSL https://raw.githubusercontent.com/Crashcart/RPG-Bot/main/uninstall.sh)"
 echo ""
