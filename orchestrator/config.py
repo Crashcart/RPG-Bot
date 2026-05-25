@@ -109,6 +109,19 @@ class Settings(BaseSettings):
     # GFS backup target (Janitor writes here)
     backups_dir:    str = "/app/backups"
 
+    # ── Speculative Narrative Pre-Computation (Zero-Latency Engine) ───────────
+    # PropheticBuffer settings — all fields have safe defaults.
+    # No .env changes required to enable; set SPECULATIVE_ENGINE_ENABLED=false
+    # to disable the feature entirely.
+    speculative_engine_enabled:        bool  = True
+    speculative_branches:              int   = 3     # max branches to pre-generate per turn
+    speculative_ttl_seconds:           int   = 300   # Redis TTL for cached branches (5 min)
+    speculative_similarity_threshold:  float = 0.30  # min keyword-overlap score for a cache hit
+    speculative_cpu_disable:           int   = 85    # CPU% → reduce to 1 branch (near-overload)
+    speculative_cpu_scale_down:        int   = 70    # CPU% → reduce to 2 branches (moderate load)
+    speculative_ram_disable:           int   = 90    # RAM% → reduce to 1 branch
+    speculative_ram_scale_down:        int   = 80    # RAM% → reduce to 2 branches
+
     # ── App ───────────────────────────────────────────────────────────────────
     log_level:          str = "INFO"
     session_secret_key: str = "change-me-to-a-long-random-string"
