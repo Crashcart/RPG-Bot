@@ -495,6 +495,85 @@ class ChannelDirective(BaseModel):
     reason:      str = Field(default="", description="Short explanation for audit logs")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Task 5 – Discord Interactive Component Schemas (Issue #16)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ButtonStyle(str, Enum):
+    """Discord button visual styles."""
+    PRIMARY   = "primary"    # blurple
+    SECONDARY = "secondary"  # grey
+    SUCCESS   = "success"    # green
+    DANGER    = "danger"     # red
+
+
+class DiscordButton(BaseModel):
+    """A single Discord button component (placed inside an ActionRow)."""
+    label:     str        = Field(..., max_length=80)
+    custom_id: str        = Field(..., max_length=100,
+                                  description="Compact encoded action string: 'action:value|key:val'")
+    style:     ButtonStyle = ButtonStyle.SECONDARY
+    disabled:  bool        = False
+    emoji:     str | None  = Field(default=None, description="Unicode emoji or Discord emoji string")
+
+
+class SelectOption(BaseModel):
+    """A single option inside a DiscordSelectMenu."""
+    label:       str        = Field(..., max_length=100)
+    value:       str        = Field(..., max_length=100,
+                                    description="Compact encoded action string passed back on selection")
+    description: str        = Field(default="", max_length=100)
+    emoji:       str | None = None
+
+
+class DiscordSelectMenu(BaseModel):
+    """A Discord string-select menu component (placed alone inside an ActionRow)."""
+    custom_id:   str               = Field(..., max_length=100)
+    placeholder: str               = Field(default="Choose an action…", max_length=150)
+    options:     list[SelectOption] = Field(default_factory=list,
+                                            description="Up to 25 options per menu")
+    min_values:  int               = Field(default=1, ge=1, le=25)
+    max_values:  int               = Field(default=1, ge=1, le=25)
+
+
+class ActionRow(BaseModel):
+    """
+    One Discord Action Row: either up to 5 buttons, or exactly 1 select menu.
+    The Discord bot is responsible for enforcing the per-row component limit.
+    """
+    components: list[DiscordButton | DiscordSelectMenu] = Field(default_factory=list)
+
+
+class UIComponentSet(BaseModel):
+    """Up to 5 Action Rows attached to a single Discord message."""
+    action_rows: list[ActionRow] = Field(default_factory=list,
+                                         description="Maximum 5 rows per message")
+    ephemeral:   bool            = Field(
+        default=False,
+        description="If True the Discord bot sends these components as an ephemeral "
+                    "message visible only to the acting player (used for inventory).",
+    )
+
+
+class ComponentInteraction(BaseModel):
+    """
+    Decoded payload from a Discord component interaction callback.
+    Constructed by UIComponentBuilder.decode_interaction() and fed back into
+    the pipeline as a new IntentPayload with command_type=SLASH_COMMAND.
+    """
+    interaction_id: str
+    player_id:      str
+    guild_id:       str
+    channel_id:     str
+    message_id:     str
+    custom_id:      str
+    action:         str                     = Field(..., description="Decoded 'action' key from custom_id")
+    params:         dict[str, str]          = Field(default_factory=dict,
+                                                    description="All other decoded key→value pairs")
+    session_token:  str                     = Field(default="",
+                                                    description="Injected by bot from Redis session lookup")
+
+
 class NarrativeResponsePayload(BaseModel):
     """
     Phase 4 output – the final payload sent to Discord.
@@ -510,14 +589,14 @@ class NarrativeResponsePayload(BaseModel):
     embed_title:   str  = Field(default="", description="Short Discord embed title")
     multimedia:    list[MultimediaCue] = Field(default_factory=list)
 
-    # ── Task 4: Paranoia Whisper (Private Perception) ─────────────────────
+    # ── Task 4: Paranoia Whisper (Private Perception) ────────────────────
     whisper: str | None = Field(
         default=None,
         description="Secret GM insight DMed to the player — what their skeptical eye notices "
                     "that no one else in the scene would catch. 2-3 sentences.",
     )
 
-    # ── Task 4: Ghost Sheet / Ephemeral Thread ────────────────────────────
+    # ── Task 4: Ghost Sheet / Ephemeral Thread ──────────────────────
     thread_event:   ThreadEvent | None = Field(
         default=None,
         description="If set, the bot manages a combat/encounter thread on this message.",
@@ -532,7 +611,7 @@ class NarrativeResponsePayload(BaseModel):
                     "inventory changes, rulebook citations. Never shown in main channel.",
     )
 
-    # ── Task 4: Voice Channel Puppeteering ────────────────────────────────
+    # ── Task 4: Voice Channel Puppeteering ────────────────────────
     ambient_audio_key: str | None = Field(
         default=None,
         description="Key for the ambient audio file to loop in the voice channel "
@@ -544,14 +623,22 @@ class NarrativeResponsePayload(BaseModel):
                     "each with its Ollama node's unique voice profile.",
     )
 
-    # ── Task 4: Channel Manipulation ─────────────────────────────────────
+    # ── Task 4: Channel Manipulation ─────────────────────────────
     channel_directive: ChannelDirective | None = Field(
         default=None,
         description="If set, the bot moves the player's Discord channel access — "
                     "into the dungeon, prison, hospital, or back to main.",
     )
 
-    # ── Driftnet: World-bound broadcast channel ───────────────────────────
+    # ── Task 5: Interactive Discord Components (Issue #16) ────────────────
+    ui_components: UIComponentSet | None = Field(
+        default=None,
+        description="Clickable buttons and select menus generated from character state. "
+                    "Populated by UIComponentBuilder after mechanical resolution; "
+                    "None when no interactive choices are appropriate for this turn.",
+    )
+
+    # ── Driftnet: World-bound broadcast channel ──────────────────────
     driftnet_channel_id: str = Field(
         default="",
         description=(
@@ -561,7 +648,7 @@ class NarrativeResponsePayload(BaseModel):
         ),
     )
 
-    # ── Multimedia: Music, SFX, Images, Handouts ─────────────────────────
+    # ── Multimedia: Music, SFX, Images, Handouts ────────────────────
     sfx_cues: list[SFXCue] = Field(
         default_factory=list,
         description="Ordered list of one-shot SFX to play after the narrative lands.",
@@ -673,7 +760,7 @@ class PipelineResult(BaseModel):
 # Async Session Feature Schemas
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ── Chronicle Recap ───────────────────────────────────────────────────────────
+# ── Chronicle Recap ──────────────────────────────────────────────────
 
 class RecapRequest(BaseModel):
     """
@@ -700,7 +787,7 @@ class RecapResponse(BaseModel):
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-# ── Campfire Mode ─────────────────────────────────────────────────────────────
+# ── Campfire Mode ───────────────────────────────────────────────────
 
 class PresenceUpdate(BaseModel):
     """Posted by the Discord bot whenever a player's online status changes."""
@@ -724,7 +811,7 @@ class CampfireStatus(BaseModel):
     checked_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-# ── Async Downtime Tasks ──────────────────────────────────────────────────────
+# ── Async Downtime Tasks ────────────────────────────────────────────
 
 class DowntimeSubmitRequest(BaseModel):
     """
