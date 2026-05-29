@@ -172,3 +172,89 @@ Optional: `CLAUDE_API_KEY` + `CLOUD_PROVIDER=claude` to switch narration from Ge
 ## Development Branch
 
 Active work lives on `claude/api-payload-schemas-0jkYr`. All Claude Code sessions should develop on branches prefixed `claude/` and push only to the designated branch.
+
+
+---
+
+## Agent Rules
+
+> Generated from `.ai-rules/rules/` by `sync-rules.sh`. Edit the source files, not this section.
+
+## Branch Rules
+
+- Always develop on a `claude/<description>-<session-id>` branch.
+- Never push directly to `alpha`, `beta`, or `main`.
+- PRs from `claude/*` branches must target `alpha`, never `main`.
+- Branch names must be lowercase, hyphen-separated, and end with the session ID.
+- The active development branch is recorded in `CLAUDE.md` under **Development Branch**.
+
+## Pipeline Contract
+
+- All inter-service data passes through Pydantic models in `orchestrator/schemas/payloads.py`.
+  Never pass raw dicts between pipeline phases.
+- **Ollama never narrates.** Phase 2 produces only `OllamaResolutionPayload`. Narrative prose is
+  Phase 4 only (GMDirector → Gemini / Claude / SillyTavern).
+- **Dice are backend-only.** The LLM requests a roll via `DiceRequest`; the backend generates the
+  result. The model cannot influence dice outcomes.
+- **NodeRouter for all Ollama calls.** Never hardcode an Ollama node URL. All calls go through
+  `NodeRouter.get_ollama_client_for_role()`.
+- `action_log` rows are immutable. Retcons set `retconned=TRUE`; rows are never deleted.
+- Sub-agent output is post-processed for brand filtering before reaching `NarrativeResponsePayload`.
+
+## Naming and Branding Rules
+
+- **In-world names must come from ingested PDF rulebooks** retrieved via RAG from ChromaDB.
+  Names that appear in the active campaign's rulebooks are allowed in generated narrative.
+- **Real-world brand names are blocked** unless the name appears in both the real world AND in an
+  ingested rulebook (e.g. a licensed product that canonically uses real brand names).
+  When in doubt, use a generic equivalent — never invent a real-world brand reference.
+- The sub-agent post-processor applies brand filtering to all `SubAgentResult` output.
+  If filtering fails after retry, `brand_violation=True` is set — do not suppress this flag.
+- Do not introduce new proper nouns, weapon names, faction names, or lore terms that are not
+  sourced from the campaign's rulebooks or the `story_facts` / `story_entities` tables.
+- NPC names, location names, and item names generated during narration must be consistent with
+  the active world's `narrative_tone` and genre (read from `WorldRegistry`).
+
+## Database Rules
+
+- New migrations go in `db/migrations/0NN_<snake_case>.sql`. The `NN` must be the next sequential
+  number. **Never modify an existing migration file.**
+- Schema changes require a migration. Never ALTER TABLE in application code.
+- `global_settings` / `system_settings` seeds belong in the migration that introduces the feature.
+- Always use asyncpg via `DatabaseService` — never a raw connection string in application code.
+- New env vars declared in `orchestrator/config.py` must also appear in `.env.example`.
+
+## Docker and Service Rules
+
+- Service names follow the `aetheris_*` network convention defined in `docker-compose.yml`.
+- New services must join `aetheris_net`. Services needing persistent storage also join `aetheris_store`.
+- Health checks are required for every new service added to `docker-compose.yml`.
+- Never hardcode ports in application code — read from environment variables.
+- External services (SillyTavern, custom Ollama nodes, remote APIs) are configured via
+  `system_settings` and are **never** added to `docker-compose.yml`.
+- Compose override files for each tier (`compose.alpha.yml`, `compose.beta.yml`, `compose.prod.yml`)
+  layer on top of the base `docker-compose.yml` — never duplicate full service definitions.
+
+## Code Quality Rules
+
+- All new Python files must pass `ruff check` with zero errors.
+- No `print()` statements — use `logging.getLogger(__name__)`.
+- No bare `except:` clauses — always catch a specific exception type.
+- Type hints required on all public function signatures.
+- Async functions must use `await` for all I/O — no blocking calls in coroutines.
+- Do not add backwards-compatibility shims for removed code. Delete cleanly.
+- Comments only where the WHY is non-obvious — do not comment what the code does.
+- New services must be exported from `orchestrator/services/__init__.py`.
+
+## Governance File Maintenance
+
+When completing a significant task, update in the same commit:
+- `.github/TODO.md` — mark completed items `[x]`, add newly discovered items
+- `.github/PLANNING.md` — record architectural decisions made and handoff notes
+
+After any change to the rule files under `.ai-rules/rules/`, run:
+  `bash .ai-rules/scripts/sync-rules.sh`
+
+This regenerates `.github/copilot-instructions.md` and `CLAUDE.md` from the modular sources.
+Commit the regenerated files alongside the rule change — never edit the targets directly.
+
