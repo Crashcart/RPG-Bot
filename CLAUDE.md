@@ -164,6 +164,10 @@ Optional: `CLAUDE_API_KEY` + `CLOUD_PROVIDER=claude` to switch narration from Ge
 - `GET /api/recap` — chronicle recap
 - `POST /api/retcon` — admin rollback
 - `POST /api/rulebook/ingest` — PDF upload
+- `GET /api/rulebook/status/{job_id}` — poll ingestion progress
+- `GET /api/rulebook/list/{campaign_id}` — list all rulebook modules
+- `DELETE /api/rulebook/{module_id}` — delete rulebook module + ChromaDB collection
+- `PATCH /api/rulebook/{module_id}/toggle` — toggle module active/inactive
 - `POST /api/vision/analyse` — image analysis (Gemini Vision)
 - `POST /api/web/search` — web search (SerpAPI / DuckDuckGo)
 - `GET /api/settings/channels` — fetch runtime channel map (used by Discord bot at startup)

@@ -12,7 +12,7 @@ Ironclad GM is a four-phase pipeline that turns free-text player actions into me
 Discord ──► Orchestrator (FastAPI) ──► Discord
                │
      ┌─────────┼─────────┐
-     ▼         ▼         ▼
+     │         │         │
   Phase 1   Phase 2   Phase 3   Phase 4
  Ingestion  Adjudic.  State    Narration
              (Ollama)  Commit   (GM Director)
@@ -225,6 +225,9 @@ RPG-Bot/
 | `POST` | `/session` | Create or refresh a player session |
 | `POST` | `/api/rulebook/ingest` | Upload and ingest a PDF rulebook (background job) |
 | `GET` | `/api/rulebook/status/{job_id}` | Poll PDF ingestion progress |
+| `GET` | `/api/rulebook/list/{campaign_id}` | List all rulebook modules for a campaign |
+| `DELETE` | `/api/rulebook/{module_id}` | Delete a rulebook module and its ChromaDB collection |
+| `PATCH` | `/api/rulebook/{module_id}/toggle` | Toggle a rulebook module active/inactive |
 | `GET` | `/api/campaign/active` | Get the active campaign for a guild |
 | `GET` | `/health` | Health check |
 | `GET` | `/web/*` | Web admin panel (Rule Forge) |
