@@ -646,6 +646,38 @@ async def api_rulebook_status(job_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Job not found or expired.")
     return progress
 
+@app.get("/api/rulebook/list/{campaign_id}", summary="List all rulebook modules for a campaign (bot API)")
+async def api_list_rulebooks(campaign_id: str) -> list[dict]:
+    """Returns all rulebook modules (active and inactive) for the given campaign."""
+    return await db.get_all_rule_modules(campaign_id)
+
+
+@app.delete("/api/rulebook/{module_id}", summary="Delete a rulebook module (bot API)")
+async def api_delete_rulebook(module_id: str) -> dict:
+    """Removes the rule_registry entry and drops the associated ChromaDB collection."""
+    module = await db.get_rule_module(module_id)
+    if not module:
+        raise HTTPException(status_code=404, detail=f"Rule module {module_id} not found.")
+    collection = module.get("chroma_collection")
+    if collection:
+        await pdf_processor.delete_collection(collection)
+    await db.delete_rule_module(module_id)
+    logger.info("Rule module deleted: %s (%s)", module.get("module_name"), module_id)
+    return {"deleted": True, "module_id": module_id, "module_name": module.get("module_name")}
+
+
+@app.patch("/api/rulebook/{module_id}/toggle", summary="Toggle a rulebook module active/inactive (bot API)")
+async def api_toggle_rulebook(module_id: str) -> dict:
+    """
+    Flips the active flag. The RAG context assembly only uses modules where
+    active=TRUE, so toggling is a zero-cost way to exclude a rulebook without deleting it.
+    """
+    module = await db.get_rule_module(module_id)
+    if not module:
+        raise HTTPException(status_code=404, detail=f"Rule module {module_id} not found.")
+    await db.toggle_rule_module(module_id)
+    return {"module_id": module_id, "active": not module["active"], "module_name": module.get("module_name")}
+
 
 @app.get("/api/campaign/active", summary="Get the active campaign for a guild (bot API)")
 async def api_active_campaign(guild_id: str) -> dict:

@@ -107,7 +107,7 @@ class DatabaseService:
             "settings": json.loads(row["settings"]) if isinstance(row["settings"], str) else dict(row["settings"]),
         }
 
-    # ── State Commitment ──────────────────────────────────────────────────────
+    # ── State Commitment ────────────────────────────────────────────
 
     async def apply_state_delta(self, delta: StateDelta) -> dict[str, Any]:
         """
@@ -229,7 +229,7 @@ class DatabaseService:
             record.get("narrative_summary", "")[:500],
         )
 
-    # ── Web UI Queries ────────────────────────────────────────────────────────
+    # ── Web UI Queries ────────────────────────────────────────────
 
     async def get_all_campaigns(self) -> list[dict[str, Any]]:
         rows = await self.pool.fetch(
@@ -317,6 +317,28 @@ class DatabaseService:
             }
             for r in rows
         ]
+
+    async def get_rule_module(self, module_id: str) -> dict[str, Any] | None:
+        row = await self.pool.fetchrow(
+            """
+            SELECT id, module_name, module_type, chroma_collection,
+                   module_data, active, loaded_at
+            FROM rule_registry
+            WHERE id = $1
+            """,
+            UUID(module_id),
+        )
+        if not row:
+            return None
+        return {
+            "id":                str(row["id"]),
+            "module_name":       row["module_name"],
+            "module_type":       row["module_type"],
+            "chroma_collection": row["chroma_collection"] or "",
+            "module_data":       json.loads(row["module_data"]) if isinstance(row["module_data"], str) else dict(row["module_data"]),
+            "active":            row["active"],
+            "loaded_at":         row["loaded_at"].strftime("%Y-%m-%d %H:%M") if row["loaded_at"] else "",
+        }
 
     async def add_rule_module(
         self,
@@ -436,7 +458,7 @@ class DatabaseService:
             for r in rows
         ]
 
-    # ── Vehicle / Asset Queries ────────────────────────────────────────────────
+    # ── Vehicle / Asset Queries ────────────────────────────────────────────
 
     async def get_vehicles_for_campaign(self, campaign_id: str) -> list[dict[str, Any]]:
         """Return all vehicles with their subsystems for a campaign."""
@@ -561,7 +583,7 @@ class DatabaseService:
         )
         return dict(row) if row else {}
 
-    # ── Node Registry ─────────────────────────────────────────────────────────
+    # ── Node Registry ─────────────────────────────────────────────────────
 
     async def get_all_nodes(self) -> list[dict[str, Any]]:
         rows = await self.pool.fetch(
@@ -692,7 +714,7 @@ class DatabaseService:
             latency_ms, node_name,
         )
 
-    # ── System Settings ────────────────────────────────────────────────────────
+    # ── System Settings ────────────────────────────────────────────
 
     async def get_system_setting(self, key: str, default: Any = None) -> Any:
         """Fetch a global system setting by key. Returns parsed Python value."""
@@ -772,7 +794,7 @@ class DatabaseService:
             UUID(node_id),
         )
 
-    # ── Lore CRUD ─────────────────────────────────────────────────────────────
+    # ── Lore CRUD ──────────────────────────────────────────────────────
 
     async def upsert_story_fact(
         self,
@@ -806,7 +828,7 @@ class DatabaseService:
             UUID(campaign_id), entity_type, entity_name,
         )
 
-    # ── Rule Registry ─────────────────────────────────────────────────────────
+    # ── Rule Registry ─────────────────────────────────────────────────────
 
     async def get_active_rule_modules(self, campaign_id: str) -> list[dict[str, Any]]:
         rows = await self.pool.fetch(

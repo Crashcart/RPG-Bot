@@ -4,7 +4,7 @@ Ironclad GM – PDF Ingestion Service
 CPU-efficient pipeline: PDF → text → chunks → ChromaDB vector store.
 
 Processing strategy (ordered by CPU cost, lowest first):
-──────────────────────────────────────────────────────────
+──────────────────────────────────────────────────────
   1. PyMuPDF text extraction  — near-zero local CPU; handles the vast
                                 majority of modern published rulebooks
                                 (the PDF has embedded text).
@@ -108,7 +108,7 @@ class PDFProcessorService:
         self._chroma_host    = chroma_host
         self._chroma_port    = chroma_port
 
-    # ── Public entry point ────────────────────────────────────────────────────
+    # ── Public entry point ─────────────────────────────────────────────────────────────────────────────────────────────
 
     async def ingest_pdf(
         self,
@@ -136,7 +136,7 @@ class PDFProcessorService:
                 "collection": collection_name,
             })
 
-            # ── Step 1: Open PDF in thread pool ───────────────────────────────
+            # ── Step 1: Open PDF in thread pool ───────────────────────────────────────────────
             loop = asyncio.get_event_loop()
             doc  = await loop.run_in_executor(None, fitz.open, str(pdf_path))
             total_pages = doc.page_count
@@ -150,7 +150,7 @@ class PDFProcessorService:
             })
             logger.info("PDF ingestion started: %s (%d pages)", module_name, total_pages)
 
-            # ── Step 2: Extract text page by page ─────────────────────────────
+            # ── Step 2: Extract text page by page ───────────────────────────────────────────────
             all_chunks: list[dict[str, Any]] = []
 
             for page_num in range(total_pages):
@@ -194,7 +194,7 @@ class PDFProcessorService:
                 })
                 return
 
-            # ── Step 3: Embed and store in ChromaDB ───────────────────────────
+            # ── Step 3: Embed and store in ChromaDB ───────────────────────────────────────────────
             await cache.set_job_progress(job_id, {
                 "status":      "embedding",
                 "page":        total_pages,
@@ -206,7 +206,7 @@ class PDFProcessorService:
 
             await self._embed_and_store(all_chunks, collection_name, job_id, cache)
 
-            # ── Step 4: Register module in rule_registry ──────────────────────
+            # ── Step 4: Register module in rule_registry ─────────────────────────────────────────────
             await db.add_rule_module(
                 campaign_id=campaign_id,
                 module_name=module_name,
@@ -242,7 +242,7 @@ class PDFProcessorService:
             except Exception:
                 pass
 
-    # ── Text Extraction ───────────────────────────────────────────────────────
+    # ── Text Extraction ───────────────────────────────────────────────────────────────────────────────────────────────
 
     @staticmethod
     def _extract_page_text_sync(doc, page_num: int) -> str:
@@ -312,7 +312,7 @@ class PDFProcessorService:
         pix    = page.get_pixmap(matrix=mat, alpha=False)  # type: ignore[attr-defined]
         return pix.tobytes("png")
 
-    # ── Embedding & Storage ───────────────────────────────────────────────────
+    # ── Embedding & Storage ─────────────────────────────────────────────────────────────────────────────
 
     async def _embed_and_store(
         self,
@@ -364,3 +364,18 @@ class PDFProcessorService:
                 "collection":      collection_name,
             })
             logger.debug("Embedded batch %d/%d", i + len(batch), total)
+
+    # ── Cleanup ──────────────────────────────────────────────────────────────────────────────────────
+
+    async def delete_collection(self, collection_name: str) -> None:
+        """Delete a ChromaDB collection. Silently ignores missing collections."""
+        import chromadb
+        try:
+            chroma = await chromadb.AsyncHttpClient(
+                host=self._chroma_host,
+                port=self._chroma_port,
+            )
+            await chroma.delete_collection(collection_name)
+            logger.info("ChromaDB collection deleted: %s", collection_name)
+        except Exception as exc:
+            logger.warning("Failed to delete ChromaDB collection %s: %s", collection_name, exc)
