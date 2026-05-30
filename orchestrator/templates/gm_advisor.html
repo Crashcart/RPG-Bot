@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}GM Advisor{% endblock %}
+{% block content %}
+
+<style>
+  .advisor-response {
+    font-size: 14px; line-height: 1.75; color: var(--text);
+    white-space: pre-wrap; font-family: 'Segoe UI', system-ui, sans-serif;
+  }
+  .advisor-response em { color: var(--gold); font-style: normal; font-weight: 600; }
+  .suggestion-chip {
+    display: inline-block; cursor: pointer;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 20px; padding: 5px 12px;
+    font-size: 12px; color: var(--muted);
+    transition: all 0.15s; margin: 4px 4px 0 0;
+  }
+  .suggestion-chip:hover { color: var(--text); border-color: var(--gold-dim); }
+</style>
+
+<div class="page-header">
+  <h1><span>🔮</span> GM Advisor</h1>
+  <p>Ask the AI for plot hooks, NPC reactions, encounter ideas, or rules clarifications — in-context with your campaign.</p>
+</div>
+
+<!-- Campaign selector -->
+<div class="filter-bar" style="margin-bottom:20px">
+  <form method="get" style="display:flex;gap:8px;align-items:center">
+    <select name="campaign_id" onchange="this.form.submit()" style="min-width:220px">
+      <option value="">— select campaign —</option>
+      {% for c in campaigns %}
+      <option value="{{ c.id }}" {% if c.id == campaign_id %}selected{% endif %}>
+        {{ c.name }}
+      </option>
+      {% endfor %}
+    </select>
+  </form>
+</div>
+
+{% if campaign_id %}
+
+<div style="display:grid;grid-template-columns:1fr 380px;gap:16px;align-items:start">
+
+  <!-- Main advisor panel -->
+  <div>
+    <!-- Query form -->
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-header">
+        <span class="card-title">Ask the GM Advisor</span>
+      </div>
+      <div class="card-body">
+        <form method="post" action="/web/gm-advisor/ask?campaign_id={{ campaign_id }}"
+              id="advisor-form">
+          <div class="form-row">
+            <label>Your Question</label>
+            <textarea name="question" id="advisor-question" rows="4"
+                      placeholder="What should happen if the players destroy the Vault of Whispers before retrieving the Sigil of Arath? Give me three branching consequences..."
+                      required>{{ question or '' }}</textarea>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div>
+              <p style="font-size:11px;color:var(--muted);margin-bottom:6px">Quick prompts:</p>
+              <div>
+                <span class="suggestion-chip" onclick="setQuestion('Suggest 3 plot hooks for the next session based on recent player actions.')">Plot hooks</span>
+                <span class="suggestion-chip" onclick="setQuestion('How would the main NPC antagonist react to what the players did last session?')">NPC reaction</span>
+                <span class="suggestion-chip" onclick="setQuestion('Design a short encounter that fits the current scene and world tone.')">Encounter</span>
+                <span class="suggestion-chip" onclick="setQuestion('Summarise the key unresolved threads and what each faction wants right now.')">Faction threads</span>
+                <span class="suggestion-chip" onclick="setQuestion('What are three natural consequences of the players\\'s last big decision?')">Consequences</span>
+              </div>
+            </div>
+            <button type="submit" class="btn btn-gold" style="align-self:flex-end;margin-left:16px">
+              Ask Advisor →
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Response panel -->
+    {% if response %}
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Advisor Response</span>
+        <form method="post" action="/web/gm-advisor/ask?campaign_id={{ campaign_id }}" style="margin:0">
+          <input type="hidden" name="question" value="{{ question }}">
+          <button type="submit" class="btn btn-ghost btn-sm">Regenerate</button>
+        </form>
+      </div>
+      <div class="card-body">
+        <div class="advisor-response">{{ response }}</div>
+      </div>
+      <div style="padding:12px 20px;border-top:1px solid var(--border);display:flex;gap:8px">
+        <form method="post" action="/web/backchannel/send" style="flex:1">
+          <input type="hidden" name="campaign_id" value="{{ campaign_id }}">
+          <input type="hidden" name="directive_type" value="gm_note">
+          <input type="hidden" name="content" value="{{ response }}">
+          <button type="submit" class="btn btn-ghost btn-sm">→ Send to Backchannel</button>
+        </form>
+        <button class="btn btn-ghost btn-sm" onclick="copyResponse()">Copy</button>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Sidebar: context summary -->
+  <div>
+    <!-- Recent actions context -->
+    {% if recent_actions %}
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-header">
+        <span class="card-title">Recent Actions</span>
+        <span class="text-muted" style="font-size:11px">context window</span>
+      </div>
+      {% for a in recent_actions %}
+      <div style="padding:10px 16px;border-bottom:1px solid rgba(255,255,255,0.04)">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px">
+          <span style="font-size:12px;font-weight:600;color:var(--text)">{{ a.action_type or 'action' }}</span>
+          <span class="badge badge-{{ a.outcome or 'inactive' }}" style="font-size:9px">{{ a.outcome or '—' }}</span>
+        </div>
+        <p class="narrative-preview" style="margin:0;max-height:60px;overflow:hidden;-webkit-line-clamp:3;display:-webkit-box;-webkit-box-orient:vertical">
+          {{ a.raw_action or '' }}
+        </p>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <!-- Active world info -->
+    {% if world %}
+    <div class="card">
+      <div class="card-header"><span class="card-title">Active World</span></div>
+      <div class="card-body" style="padding:14px 16px">
+        <p style="font-size:15px;font-weight:700;color:var(--gold);margin-bottom:4px">{{ world.display_name }}</p>
+        {% if world.narrative_tone %}
+        <p style="font-size:12px;color:var(--muted);margin-bottom:8px">{{ world.narrative_tone }}</p>
+        {% endif %}
+        {% if world.description %}
+        <p style="font-size:12px;color:var(--text);line-height:1.6">{{ world.description }}</p>
+        {% endif %}
+        {% if world.tags %}
+        <div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:4px">
+          {% for tag in world.tags %}
+          <span class="badge badge-inactive" style="font-size:9px">{{ tag }}</span>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+
+</div>
+
+{% else %}
+<div class="empty">
+  <div class="empty-icon">🔮</div>
+  <p>Select a campaign to consult the GM Advisor.</p>
+</div>
+{% endif %}
+
+<script>
+function setQuestion(text) {
+  document.getElementById('advisor-question').value = text;
+  document.getElementById('advisor-question').focus();
+}
+function copyResponse() {
+  const el = document.querySelector('.advisor-response');
+  if (el) navigator.clipboard.writeText(el.innerText);
+}
+</script>
+
+{% endblock %}

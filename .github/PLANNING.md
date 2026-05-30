@@ -30,10 +30,10 @@ Update this file whenever a significant decision is made or a session hands off 
   `/api/music/*`, `/api/settings/value`.
 
 ### What remains
-- White Portal pages: `handouts.html`, `factions.html`, `gm_advisor.html`
 - ComfyUI in `docker-compose.yml`
 - PropheticBuffer idle prefetch expansion
 - Brand filtering integration (PDF-sourced names allowed; real-world brands blocked)
+- Wire `handout_svc`, `faction_svc`, `gemini`, `world_registry` onto `app.state` in `main.py` lifespan
 
 ---
 
@@ -68,13 +68,13 @@ architecture review.
 
 ## Handoff Notes
 
-### For the next agent picking up White Portal pages
-- `HandoutService`, `FactionService`, `ImageGenService` are all initialised in `main.py` lifespan.
-- Existing route pattern: `GET /web/<page>` returns `TemplateResponse`, `POST /web/<page>/action`
-  does work then `RedirectResponse` back. See `web_ui.py` `/web/backchannel` for a clean example.
-- Flash messages via `request.session["flash_ok"]` / `request.session["flash_err"]`, consumed in
-  the GET handler.
-- New nav links go in `orchestrator/templates/base.html` in the `nav-links` block.
+### White Portal pages (completed 2026-05-30)
+- `handouts.html`, `factions.html`, `gm_advisor.html` — all three created.
+- Routes added to `web_ui.py`: `/handouts`, `/handouts/create`, `/handouts/deliver`,
+  `/factions`, `/factions/upsert`, `/factions/adjust`, `/gm-advisor`, `/gm-advisor/ask`.
+- Nav updated in `base.html`.
+- Helper accessors `_handout_svc`, `_faction_svc`, `_gemini`, `_world_registry` added.
+- **Remaining**: expose these four on `app.state` in `main.py` lifespan so the accessors work.
 
 ### For the next agent expanding PropheticBuffer
 - `PropheticBuffer` is in `orchestrator/services/prophetic_buffer.py`.

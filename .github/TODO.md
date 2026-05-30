@@ -29,16 +29,19 @@ Statuses: `[x]` completed · `[-]` in-progress · `[ ]` not-started
 - [x] Add SillyTavern to `orchestrator/services/openai_compat_client.py`, `config.py`, `web_ui.py`, `settings.html`
 
 ### Governance / .github
-- [-] Create `.github/` governance files (REPO_SETUP_GUIDE, copilot-instructions, REPO_CONFIG, TODO, PLANNING, BRANCH_AWARE_FILES, ci.yml, pull_request_template)
+- [x] Create `.github/` governance files (REPO_SETUP_GUIDE, copilot-instructions, REPO_CONFIG, TODO, PLANNING, BRANCH_AWARE_FILES, ci.yml, pull_request_template)
+
+### White Portal
+- [x] Create `handouts.html`, `factions.html`, `gm_advisor.html` templates
+- [x] Update `web_ui.py` — handouts/factions/gm-advisor GET+POST routes
+- [x] Update `base.html` nav — Handouts, Factions, Advisor links
+- [x] Create `compose.alpha.yml`, `compose.beta.yml`, `compose.prod.yml` tier overrides
 
 ### Pending
-- [ ] White Portal — create `handouts.html`, `factions.html`, `gm_advisor.html` templates
-- [ ] White Portal — update `web_ui.py` routes for handouts, factions, GM advisor pages
-- [ ] White Portal — update `base.html` nav links for new pages
 - [ ] Add ComfyUI service to `docker-compose.yml`
 - [ ] Expand `PropheticBuffer.run_idle_prefetch()` — music/portraits/scene images/recaps during idle
 - [ ] Brand filtering — update sub-agent post-processor to allow PDF-sourced names
-- [ ] Create `compose.alpha.yml`, `compose.beta.yml`, `compose.prod.yml` tier overrides
+- [ ] Expose `handout_svc`, `faction_svc`, `gemini`, `world_registry` on `app.state` in `main.py` lifespan so web_ui routes can resolve them
 
 ---
 

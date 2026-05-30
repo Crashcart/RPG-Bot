@@ -260,9 +260,13 @@ async def lifespan(app: FastAPI):
     )
 
     # Expose services to web router and middleware
-    app.state.backchannel = backchannel
-    app.state.telemetry   = telemetry_svc
-    app.state.auth        = auth
+    app.state.backchannel    = backchannel
+    app.state.telemetry      = telemetry_svc
+    app.state.auth           = auth
+    app.state.handout_svc    = handout_svc
+    app.state.faction_svc    = faction_svc
+    app.state.gemini         = gemini
+    app.state.world_registry = world_registry
 
     # Start downtime background resolver
     resolver_task = asyncio.create_task(_downtime_resolver_loop())
