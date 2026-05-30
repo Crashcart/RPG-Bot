@@ -1,38 +1,133 @@
 #!/usr/bin/env bash
 # sync-rules.sh — Assemble modular rule files into agent-specific governance targets.
 #
-# Usage:
-#   bash .ai-rules/scripts/sync-rules.sh          # from repo root
+# Normal usage (from repo root after first install):
+#   bash .ai-rules/scripts/sync-rules.sh
 #
-# What it produces:
-#   .github/copilot-instructions.md   — GitHub Copilot + all AI agent rules
-#   CLAUDE.md (rules section only)    — appends/replaces the "## Agent Rules" block
+# Bootstrap from scratch (no local copy yet):
+#   curl -fsSL https://raw.githubusercontent.com/crashcart/ai-rules/main/scripts/sync-rules.sh | bash
 #
-# Rule source files (`.ai-rules/rules/NN-*.md`) are concatenated in filename order.
-# Edit the source files — never edit the targets directly.
+# Bootstrap mode downloads rule files from crashcart/ai-rules, installs them
+# into .ai-rules/, then runs the normal sync to generate governance targets.
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# ── Constants ──────────────────────────────────────────────────────────────────
+
+RULES_REPO_RAW="https://raw.githubusercontent.com/crashcart/ai-rules/main"
+RULES_REPO_API="https://api.github.com/repos/crashcart/ai-rules/contents"
+
+# ── Detect bootstrap vs normal mode ───────────────────────────────────────────
+# When piped through curl, BASH_SOURCE[0] is empty or /dev/stdin.
+# We also treat it as bootstrap if .ai-rules/rules/ doesn't exist yet.
+
+_is_bootstrap() {
+  local src="${BASH_SOURCE[0]:-}"
+  [[ -z "$src" || "$src" == "/dev/stdin" || "$src" == "bash" ]] && return 0
+  [[ ! -d "$REPO_ROOT/.ai-rules/rules" ]] && return 0
+  return 1
+}
+
+# ── Find repo root (walk up from cwd looking for .git) ────────────────────────
+
+_find_repo_root() {
+  local dir="$PWD"
+  while [[ "$dir" != "/" ]]; do
+    [[ -d "$dir/.git" ]] && { echo "$dir"; return 0; }
+    dir="$(dirname "$dir")"
+  done
+  # No .git found — use cwd (allows running outside a git repo)
+  echo "$PWD"
+}
+
+REPO_ROOT="$(_find_repo_root)"
+
+# ── Bootstrap: download rules from crashcart/ai-rules ─────────────────────────
+
+_bootstrap() {
+  echo "Bootstrap mode: downloading rules from crashcart/ai-rules ..."
+  echo "  Target repo root: $REPO_ROOT"
+  echo ""
+
+  local rules_dir="$REPO_ROOT/.ai-rules/rules"
+  local scripts_dir="$REPO_ROOT/.ai-rules/scripts"
+  mkdir -p "$rules_dir" "$scripts_dir"
+
+  # Fetch file listing from GitHub API
+  local listing
+  if ! listing="$(curl -fsSL "$RULES_REPO_API/rules" 2>/dev/null)"; then
+    echo "ERROR: Could not reach GitHub API. Check your network connection." >&2
+    exit 1
+  fi
+
+  # Extract download_url values from the JSON response (no jq dependency)
+  local urls
+  urls="$(echo "$listing" | grep -o '"download_url": *"[^"]*"' | sed 's/"download_url": *"//' | sed 's/"$//')"
+
+  if [[ -z "$urls" ]]; then
+    echo "ERROR: No rule files found in crashcart/ai-rules/rules." >&2
+    exit 1
+  fi
+
+  local count=0
+  while IFS= read -r url; do
+    local filename
+    filename="$(basename "$url")"
+    echo "  Downloading: $filename"
+    curl -fsSL "$url" -o "$rules_dir/$filename"
+    count=$((count + 1))
+  done <<< "$urls"
+
+  echo ""
+  echo "  Downloaded $count rule file(s) to .ai-rules/rules/"
+
+  # Install this script itself into .ai-rules/scripts/
+  echo "  Installing sync-rules.sh ..."
+  curl -fsSL "$RULES_REPO_RAW/scripts/sync-rules.sh" -o "$scripts_dir/sync-rules.sh"
+  chmod +x "$scripts_dir/sync-rules.sh"
+
+  echo ""
+  echo "Bootstrap complete. Running sync ..."
+  echo "────────────────────────────────────────"
+
+  # Now run the normal sync with the installed files
+  REPO_ROOT="$REPO_ROOT" bash "$scripts_dir/sync-rules.sh"
+  exit 0
+}
+
+# ── Normal mode ───────────────────────────────────────────────────────────────
+
 RULES_DIR="$REPO_ROOT/.ai-rules/rules"
 COPILOT_OUT="$REPO_ROOT/.github/copilot-instructions.md"
 CLAUDE_MD="$REPO_ROOT/CLAUDE.md"
 
+# Dispatch to bootstrap if needed
+if _is_bootstrap; then
+  _bootstrap
+fi
+
 # ── Validate environment ──────────────────────────────────────────────────────
 
-if [ ! -d "$RULES_DIR" ]; then
+if [[ ! -d "$RULES_DIR" ]]; then
   echo "ERROR: Rules directory not found: $RULES_DIR" >&2
+  echo "  Run the bootstrap first:" >&2
+  echo "    curl -fsSL $RULES_REPO_RAW/scripts/sync-rules.sh | bash" >&2
   exit 1
 fi
 
-rule_files=("$RULES_DIR"/[0-9][0-9]-*.md)
-if [ ${#rule_files[@]} -eq 0 ] || [ ! -f "${rule_files[0]}" ]; then
+mapfile -t rule_files < <(find "$RULES_DIR" -maxdepth 1 -name "[0-9][0-9]-*.md" | sort)
+
+if [[ ${#rule_files[@]} -eq 0 ]]; then
   echo "ERROR: No rule files found in $RULES_DIR (expected NN-*.md)" >&2
   exit 1
 fi
 
+echo "Syncing rules from ${#rule_files[@]} source file(s) ..."
+echo ""
+
 # ── Build .github/copilot-instructions.md ─────────────────────────────────────
 
+mkdir -p "$REPO_ROOT/.github"
 echo "Generating $COPILOT_OUT ..."
 
 {
@@ -43,66 +138,79 @@ echo "Generating $COPILOT_OUT ..."
   echo ""
   echo "---"
   echo ""
-
   for f in "${rule_files[@]}"; do
-    echo "$(cat "$f")"
+    cat "$f"
     echo ""
   done
 } > "$COPILOT_OUT"
 
 echo "  Written: $COPILOT_OUT ($(wc -l < "$COPILOT_OUT") lines)"
 
-# ── Update CLAUDE.md — replace ## Agent Rules block ──────────────────────────
+# ── Update CLAUDE.md — replace ## Agent Rules block ───────────────────────────
 
-if [ -f "$CLAUDE_MD" ]; then
+if [[ -f "$CLAUDE_MD" ]]; then
   echo "Updating $CLAUDE_MD ..."
 
-  # Build the replacement block
-  agent_rules_block="## Agent Rules
-
-> Generated from \`.ai-rules/rules/\` by \`sync-rules.sh\`. Edit the source files, not this section.
-
-"
-  for f in "${rule_files[@]}"; do
-    agent_rules_block+="$(cat "$f")"$'\n\n'
-  done
+  # Build replacement block as a temp file (avoids shell quoting issues)
+  local_tmp="$(mktemp)"
+  {
+    echo "## Agent Rules"
+    echo ""
+    echo "> Generated from \`.ai-rules/rules/\` by \`sync-rules.sh\`. Edit the source files, not this section."
+    echo ""
+    for f in "${rule_files[@]}"; do
+      cat "$f"
+      echo ""
+    done
+  } > "$local_tmp"
 
   if grep -q "^## Agent Rules" "$CLAUDE_MD"; then
-    # Replace existing block: from "## Agent Rules" to the next "## " heading (or EOF)
-    python3 - "$CLAUDE_MD" "$agent_rules_block" <<'PYEOF'
+    python3 - "$CLAUDE_MD" "$local_tmp" <<'PYEOF'
 import sys, re
 
-path = sys.argv[1]
-new_block = sys.argv[2]
+path     = sys.argv[1]
+new_path = sys.argv[2]
 
 with open(path, 'r') as fh:
     content = fh.read()
+with open(new_path, 'r') as fh:
+    new_block = fh.read().rstrip()
 
-# Replace from "## Agent Rules" up to (but not including) the next "## " heading or EOF
-pattern = r'(## Agent Rules\n).*?(?=\n## |\Z)'
-replacement = new_block.rstrip()
-updated = re.sub(pattern, replacement, content, flags=re.DOTALL)
+# Replace from "## Agent Rules" to next "## " heading (or EOF)
+updated = re.sub(
+    r'^## Agent Rules\b.*?(?=^## |\Z)',
+    new_block + '\n',
+    content,
+    flags=re.DOTALL | re.MULTILINE,
+)
 
 with open(path, 'w') as fh:
     fh.write(updated)
 PYEOF
     echo "  Updated existing ## Agent Rules block in $CLAUDE_MD"
   else
-    # Append the block at the end
-    printf '\n\n---\n\n%s' "$agent_rules_block" >> "$CLAUDE_MD"
+    {
+      echo ""
+      echo ""
+      echo "---"
+      echo ""
+      cat "$local_tmp"
+    } >> "$CLAUDE_MD"
     echo "  Appended ## Agent Rules block to $CLAUDE_MD"
   fi
+
+  rm -f "$local_tmp"
 else
-  echo "  CLAUDE.md not found — skipping CLAUDE.md update."
+  echo "  CLAUDE.md not found — skipping."
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
-echo "Sync complete. Files updated:"
-echo "  .github/copilot-instructions.md"
-[ -f "$CLAUDE_MD" ] && echo "  CLAUDE.md"
+echo "Sync complete. Commit the updated files alongside any rule changes:"
 echo ""
-echo "Commit the updated files alongside any rule changes:"
 echo "  git add .ai-rules/rules/ .github/copilot-instructions.md CLAUDE.md"
 echo "  git commit -m 'rules: <describe change>'"
+echo ""
+echo "To re-bootstrap from the central repo at any time:"
+echo "  curl -fsSL $RULES_REPO_RAW/scripts/sync-rules.sh | bash"
