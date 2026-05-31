@@ -19,6 +19,7 @@ version: '3.9'
 #   ironclad-csv-sync CSV export worker
 #   media-proxy    Static asset server (:8001)
 #   lavalink       Audio engine (:2333)
+#   piper-tts      Local neural TTS — rhasspy/piper (:10200)
 # ─────────────────────────────────────────────────────────────────────────────
 
 networks:
@@ -36,6 +37,7 @@ volumes:
   csv-exports:
   media-assets:
   pdf-uploads:
+  piper-models:    # voice model weights downloaded on first use
 
 services:
 
@@ -62,6 +64,7 @@ services:
       - WORLD_DATA_DIR=/app/data
       - LOGS_DIR=/app/logs
       - BACKUPS_DIR=/app/backups
+      - PIPER_URL=http://piper-tts:10200
     depends_on:
       ironclad-db:
         condition: service_healthy
@@ -274,3 +277,27 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # ── Piper TTS (Local Neural Text-to-Speech — Issue #15) ─────────────────────
+  # linuxserver/piper runs the rhasspy/piper engine with an HTTP API on :10200.
+  # Voice models are downloaded into the piper-models volume on first request.
+  # API: POST /api/tts?voice=<model_id>  Content-Type: text/plain  → audio/wav
+  piper-tts:
+    image: lscr.io/linuxserver/piper:latest
+    container_name: aetheris-piper-tts
+    restart: unless-stopped
+    networks:
+      - aetheris_net
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - PIPER_VOICE=${PIPER_NARRATOR_MODEL:-en_US-lessac-medium}
+    volumes:
+      - piper-models:/config
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:10200/api/voices | grep -q '\"name\"' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
