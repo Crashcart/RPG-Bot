@@ -10,7 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # ── PostgreSQL ────────────────────────────────────────────────────────────
+    # ── PostgreSQL ─────────────────────────────────────────────────────────────
     postgres_db:       str = "ironclad"
     postgres_user:     str = "ironclad"
     postgres_password: str
@@ -38,16 +38,21 @@ class Settings(BaseSettings):
     redis_password: str
     session_ttl_seconds: int = 3600
 
+    # ── NATS (multi-agent message bus) ───────────────────────────────────────────
+    # NatsBus degrades gracefully if the server is unreachable at startup.
+    nats_url:               str  = "nats://ironclad-nats:4222"
+    nats_jetstream_enabled: bool = True
+
     # ── Ollama ────────────────────────────────────────────────────────────────
     ollama_host:  str = "http://ironclad-ollama:11434"
     ollama_model: str = "mistral:7b-instruct"
     ollama_timeout_seconds: int = 60
 
-    # ── Gemini API ────────────────────────────────────────────────────────────
+    # ── Gemini API ──────────────────────────────────────────────────────────────
     gemini_api_key: str
     gemini_model:   str = "gemini-1.5-pro"
 
-    # ── Anthropic Claude API ──────────────────────────────────────────────────
+    # ── Anthropic Claude API ────────────────────────────────────────────────────
     # Set CLAUDE_API_KEY and optionally CLOUD_PROVIDER=claude to use Claude as
     # the Tier 1 storyteller instead of Gemini.  Gemini remains the default.
     claude_api_key: str = ""
@@ -55,14 +60,14 @@ class Settings(BaseSettings):
     # cloud_provider: "gemini" (default) | "claude"
     cloud_provider: str = "gemini"
 
-    # ── ChromaDB ──────────────────────────────────────────────────────────────
+    # ── ChromaDB ───────────────────────────────────────────────────────────────
     chroma_host: str = "ironclad-chroma"
     chroma_port: int = 8000
 
-    # ── Media Proxy ───────────────────────────────────────────────────────────
+    # ── Media Proxy ────────────────────────────────────────────────────────────
     media_proxy_url: str = "http://media-asset-proxy:8001"
 
-    # ── Web Search (optional — DuckDuckGo used as free fallback) ─────────────
+    # ── Web Search (optional — DuckDuckGo used as free fallback) ─────────────────
     # Set SERPAPI_KEY for full web results via SerpAPI, or leave blank for
     # DuckDuckGo Instant Answers (no key required).
     serpapi_key: str = ""
@@ -85,12 +90,12 @@ class Settings(BaseSettings):
     together_api_key:   str = ""
     together_model:     str = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
 
-    # ── OpenAI (DALL-E 3 image gen + TTS alternative) ─────────────────────────
+    # ── OpenAI (DALL-E 3 image gen + TTS alternative) ────────────────────────
     openai_api_key:   str = ""
     openai_tts_model: str = "tts-1"
     openai_tts_voice: str = "onyx"
 
-    # ── SillyTavern (external OpenAI-compatible frontend proxy) ───────────────
+    # ── SillyTavern (external OpenAI-compatible frontend proxy) ─────────────────
     # SillyTavern is NOT installed as part of this stack.
     # Point sillytavern_url at an existing SillyTavern instance.
     # Typical endpoint: http://<host>:8000/api/openai/v1
@@ -99,7 +104,7 @@ class Settings(BaseSettings):
     sillytavern_model:    str = ""   # optional model hint; leave blank to use ST's active model
     sillytavern_api_key:  str = ""   # optional — only if ST has API key protection enabled
 
-    # ── Aetheris Storage Paths (TDR §2) ──────────────────────────────────────
+    # ── Aetheris Storage Paths (TDR §2) ─────────────────────────────────────────
     # Root data directory — shared volume mounted at /app/data
     world_data_dir: str = "/app/data"
     # SQLite vault (RealityWall scribe_core.db lives here)
