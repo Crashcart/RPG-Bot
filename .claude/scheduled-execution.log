@@ -1,0 +1,33 @@
+[2026-06-03T11:02:38Z] [CONFIG] Loaded .github/docker-optimization.md — Docker image optimization guide (no TIER/label/filter rules found; general reference doc)
+[2026-06-03T11:02:38Z] [CONFIG] No copilot-instructions.md found in .github/ — using CLAUDE.md project instructions as governing rules
+[2026-06-03T11:02:38Z] [CONFIG] Active development branch: claude/api-payload-schemas-0jkYr
+[2026-06-03T11:02:38Z] [INFO] Initialized for crashcart/rpg-bot
+
+[DISCOVERY LOG]
+[2026-06-03T11:05:44Z] [DISCOVERY] Issue #25 enhancement | clear | NOT_IMPLEMENTED — Campaign Containerization (1 comment: ack only)
+[2026-06-03T11:05:44Z] [DISCOVERY] Issue #24 enhancement | clear | NOT_IMPLEMENTED — Market Maker (1 comment: ack only)
+[2026-06-03T11:05:44Z] [DISCOVERY] Issue #23 enhancement | clear | NOT_IMPLEMENTED — Lavalink Integration (1 comment: ack only)
+[2026-06-03T11:05:44Z] [DISCOVERY] Issue #22 enhancement | clear | NOT_IMPLEMENTED — Edge-Cluster Deployment (1 comment: ack only)
+[2026-06-03T11:05:44Z] [DISCOVERY] Issue #21 enhancement | clear | NOT_IMPLEMENTED — Cargo Hauling & Spatial Routing (1 comment: ack only)
+[2026-06-03T11:05:44Z] [DISCOVERY] Issue #19 enhancement | clear | COMPLETE — Whisper Protocol (PR #48 open, awaiting merge)
+[2026-06-03T11:05:44Z] [DISCOVERY] Issue #18 enhancement | clear | NOT_IMPLEMENTED — AudioCraft Soundscaping (1 comment: ack only)
+[2026-06-03T11:05:44Z] [DISCOVERY] Issue #17 enhancement | clear | COMPLETE — Rulebook Ingestion (PR #55 open)
+[2026-06-03T11:05:44Z] [DISCOVERY] Issue #16 enhancement | clear | COMPLETE — Discord UI Components (PR #54 open)
+[2026-06-03T11:05:44Z] [DISCOVERY] Issue #15 enhancement | clear | COMPLETE — TTS Pipeline (PR #56 open)
+[2026-06-03T11:05:44Z] [DISCOVERY] Issue #14 enhancement | clear | COMPLETE — Speculative Pre-Computation (PR #51 open)
+[2026-06-03T11:05:44Z] [DISCOVERY] Issue #13 enhancement | clear | COMPLETE — ABES World Tick (PR #50 open)
+[2026-06-03T11:05:44Z] [DISCOVERY] Issue #12 enhancement | clear | COMPLETE — Immersion Middleware (PR #49 open)
+[2026-06-03T11:05:44Z] [DISCOVERY] Issue #11 enhancement | clear | COMPLETE — Stealth Mechanics (PR #35 open)
+[2026-06-03T11:05:44Z] [DISCOVERY] Issue #10 enhancement | clear | COMPLETE — NATS JetStream bus (PR #58 open)
+[2026-06-03T11:05:44Z] [DISCOVERY] Issue #9 enhancement | clear | COMPLETE — Campaign Vault (PR #57 open)
+[2026-06-03T11:05:44Z] [DISCOVERY] Issue #8 enhancement | clear | NOT_IMPLEMENTED — Multi-Agent Vector-Space NPC Sync (1 comment: ack only; copilot WIP draft PR #32)
+[2026-06-03T11:05:44Z] [DISCOVERY] Issue #7 enhancement | clear | COMPLETE — Object Tracker (PR #53 open)
+[2026-06-03T11:05:44Z] [DISCOVERY] Issue #6 enhancement help-wanted | clear | COMPLETE — Docker Preflight (PR #52 open)
+[2026-06-03T11:05:44Z] [DISCOVERY COMPLETE] 19 issues total: 12 completed/PRs-open, 7 not implemented. No duplicates to consolidate beyond #20→#19 (already done). No unanswered clarification questions on unimplemented issues. Highest migration on any open PR: 017. Selecting Issue #21 (Cargo Hauling) — self-contained asyncio service, builds on existing vehicles/vehicle_subsystems tables, no unmerged dependencies.
+[2026-06-03T11:10:48Z] [PHASE 1/4] Complete — branch claude/feat/issue-21-cargo-hauling created from main
+[2026-06-03T11:10:48Z] [PHASE 2/4] Complete — docs/issue-21-solution.md written
+[2026-06-03T11:12:34Z] [PUSH] Code pushed to origin/claude/feat/issue-21-cargo-hauling
+[2026-06-03T11:12:34Z] [PULL_REQUEST] PR #59 created — https://github.com/Crashcart/RPG-Bot/pull/59
+[2026-06-03T11:12:34Z] [PHASE 3/4] Complete — SpatialWorker implemented (spatial_worker.py, 018_cargo_hauling.sql, payloads.py schemas, config.py settings, .env.example, 22 unit tests)
+[2026-06-03T11:12:34Z] [PHASE 4/4] Merge request posted on issue #21 — awaiting human merge of PR #59
+[2026-06-03T11:12:34Z] [ESCALATION] PR #59 awaiting human merge — autonomous agent cycle complete for issue #21
