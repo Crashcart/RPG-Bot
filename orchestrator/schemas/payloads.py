@@ -839,4 +839,78 @@ class GMDirective(BaseModel):
     priority:        int
     status:          str  = "pending"    # pending | consumed | cancelled
     submitted_at:    datetime
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Issue #21 – Cargo Hauling & Spatial Routing
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TransitState(str, Enum):
+    IDLE        = "idle"
+    IN_TRANSIT  = "in_transit"
+    INTERDICTED = "interdicted"
+    DOCKED      = "docked"
+
+
+class TransitEventType(str, Enum):
+    DEPARTURE     = "departure"
+    ARRIVAL       = "arrival"
+    INTERDICTION  = "interdiction"
+    FUEL_WARNING  = "fuel_warning"
+    FUEL_EMPTY    = "fuel_empty"
+    COURSE_UPDATE = "course_update"
+
+
+class NavComputerState(BaseModel):
+    """Stored in vehicles.nav_computer JSONB.  Written by SpatialWorker."""
+    transit_state:       TransitState = TransitState.IDLE
+    origin_name:         str          = ""
+    destination_name:    str          = ""
+    origin_x:            float        = 0.0
+    origin_y:            float        = 0.0
+    origin_z:            float        = 0.0
+    dest_x:              float        = 0.0
+    dest_y:              float        = 0.0
+    dest_z:              float        = 0.0
+    current_x:           float        = 0.0
+    current_y:           float        = 0.0
+    current_z:           float        = 0.0
+    speed:               float        = 10.0   # coordinate units per tick
+    distance_total:      float        = 0.0
+    distance_remaining:  float        = 0.0
+    eta_seconds:         int          = 0
+    fuel_remaining:      float        = 100.0
+    fuel_capacity:       float        = 100.0
+    fuel_per_tick:       float        = 0.5
+    departure_at:        datetime | None = None
+    interdiction_hazard: str | None   = None   # hazard zone name when interdicted
+
+
+class CourseRequest(BaseModel):
+    """
+    Discord /set_course command payload → POST /api/vehicle/{vehicle_id}/course.
+    The backend validates fuel, calculates route geometry, and starts transit.
+    """
+    vehicle_id:        str
+    campaign_id:       str
+    destination_name:  str
+    dest_x:            float
+    dest_y:            float
+    dest_z:            float  = 0.0
+    speed_override:    float | None = None   # optional; defaults to vehicle's speed stat
+
+
+class TransitEvent(BaseModel):
+    """Emitted by SpatialWorker for each significant transit milestone."""
+    event_id:      str       = Field(default_factory=lambda: str(uuid.uuid4()))
+    vehicle_id:    str
+    campaign_id:   str
+    event_type:    TransitEventType
+    x:             float     = 0.0
+    y:             float     = 0.0
+    z:             float     = 0.0
+    sector_name:   str       = ""
+    description:   str       = ""
+    event_data:    dict[str, Any] = Field(default_factory=dict)
+    occurred_at:   datetime  = Field(default_factory=lambda: datetime.now(timezone.utc))
     consumed_at:     datetime | None = None

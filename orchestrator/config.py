@@ -109,6 +109,14 @@ class Settings(BaseSettings):
     # GFS backup target (Janitor writes here)
     backups_dir:    str = "/app/backups"
 
+    # ── Spatial Worker (Issue #21 — Cargo Hauling) ───────────────────────────
+    # Tick interval controls how often the spatial worker advances vehicles.
+    # Lower = smoother transit, higher = less DB load.
+    spatial_tick_interval_seconds: int = 60
+    # Optional Discord webhook for arrival/interdiction/fuel notifications.
+    # Leave empty to disable Discord alerts for transit events.
+    spatial_discord_webhook_url: str = ""
+
     # ── App ───────────────────────────────────────────────────────────────────
     log_level:          str = "INFO"
     session_secret_key: str = "change-me-to-a-long-random-string"
