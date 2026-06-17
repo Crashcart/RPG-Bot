@@ -90,6 +90,9 @@ _EXCLUDED_TABLES = (
     "retcon_log",
 )
 
+# Media file extensions included in the bundle
+_MEDIA_EXTENSIONS = {".png", ".mp3", ".mp4", ".ogg", ".wav"}
+
 
 class ModuleExporter:
     """
@@ -164,7 +167,7 @@ class ModuleExporter:
 
     # ── Background export pipeline ───────────────────────────────────────────
 
-    async def _run_export((
+    async def _run_export(
         self,
         job_id: str,
         campaign_id: str,
@@ -181,9 +184,9 @@ class ModuleExporter:
             # Step 1: extract lore tables
             table_counts: dict[str, int] = {}
             for table in _LORE_TABLES:
-                count = await self._extract_table(conn=None, table=table,
-                                                   campaign_id=campaign_id,
-                                                   out_dir=campaign_dir)
+                count = await self._extract_table(
+                    table=table, campaign_id=campaign_id, out_dir=campaign_dir
+                )
                 table_counts[table] = count
 
             # Step 2: extract action log with sanitization
@@ -207,7 +210,7 @@ class ModuleExporter:
             # Step 5: bundle media
             media_file_count = 0
             if include_media:
-                media_file_count = self._bundle_media(campaign_id, campaign_dir)
+                media_file_count = self._bundle_media(campaign_dir)
 
             # Step 6: generate manifest
             manifest = self._generate_manifest(
@@ -242,7 +245,6 @@ class ModuleExporter:
 
     async def _extract_table(
         self,
-        conn: Any,
         table: str,
         campaign_id: str,
         out_dir: Path,
@@ -324,21 +326,19 @@ class ModuleExporter:
 
     def _bundle_media(
         self,
-        campaign_id: str,
         out_dir: Path,
+        data_base: Path = Path("/app/data"),
     ) -> int:
         """
-        Copy handouts/{world}/ and echo_vault/{world}/ for the campaign.
+        Copy handouts/{world}/ and echo_vault/{world}/ into out_dir/media/.
         Returns the number of media files copied.
         """
-        from ..services.reality_wall import RealityWall
         media_dir = out_dir / "media"
         media_dir.mkdir(exist_ok=True)
         count = 0
 
-        base = Path("/app/data")
         for silo in ("handouts", "echo_vault"):
-            silo_path = base / silo
+            silo_path = data_base / silo
             if not silo_path.exists():
                 continue
             for world_dir in silo_path.iterdir():
@@ -347,7 +347,7 @@ class ModuleExporter:
                 dst = media_dir / silo / world_dir.name
                 dst.mkdir(parents=True, exist_ok=True)
                 for f in world_dir.iterdir():
-                    if f.suffix.lower() in (".png", ".mp3", ".mp4", ".ogg", ".wav"):
+                    if f.suffix.lower() in _MEDIA_EXTENSIONS:
                         shutil.copy2(f, dst / f.name)
                         count += 1
         return count
