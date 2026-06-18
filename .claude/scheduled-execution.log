@@ -1,0 +1,25 @@
+[2026-06-18T00:00:00Z] SESSION START — Ironclad GM autonomous agent
+[2026-06-18T00:00:05Z] PHASE 0: Loading .github/ configuration — found docker-optimization.md (no copilot-instructions.md); defaulting to CLAUDE.md project rules
+[2026-06-18T00:00:10Z] PHASE 1: DISCOVERY — scanning open issues
+[2026-06-18T00:00:15Z] Evaluated 19 open issues; identified 4 candidates without claude/ branch implementations: #8, #18, #22, #23
+[2026-06-18T00:00:20Z] SELECTION: Issue #22 — Distributed Edge-Cluster Deployment (Docker Swarm + WireGuard + WoL + multi-arch CI)
+[2026-06-18T00:00:22Z]   Rationale: most concrete TDR specification, highest complexity/value ratio, zero competing claude/ branches, all comments read
+[2026-06-18T00:00:25Z] PHASE 2: ENVIRONMENT — branch claude/feat/issue-22-edge-cluster created from claude/api-payload-schemas-0jkYr @ SHA 373f3c8
+[2026-06-18T00:00:30Z] PHASE 3: IMPLEMENTATION — drafting 15 files
+[2026-06-18T00:01:00Z]   + orchestrator/services/edge_cluster.py — EdgeClusterManager (WoL magic packet, SSH shutdown, node registration, thermal health)
+[2026-06-18T00:01:05Z]   + orchestrator/tests/__init__.py — test package init
+[2026-06-18T00:01:10Z]   + orchestrator/tests/test_edge_cluster.py — 5 test classes, 17 test cases
+[2026-06-18T00:01:15Z]   + .github/workflows/multiarch-build.yml — matrix build linux/amd64 + linux/arm64 via Buildx/QEMU, 6-service matrix
+[2026-06-18T00:01:20Z]   + deploy/swarm/docker-stack.control.yml — control plane stack (all services except brain), Docker secrets
+[2026-06-18T00:01:25Z]   + deploy/swarm/docker-stack.worker.yml — worker stack (brain/Ollama), Intel GPU passthrough, worker placement
+[2026-06-18T00:01:30Z]   + deploy/swarm/docker-stack.nfs.yml — NFS volume overlay for shared Ollama model storage
+[2026-06-18T00:01:35Z]   + deploy/wireguard/wg-control.conf.template — WireGuard control plane (10.22.0.1/24, port 51820)
+[2026-06-18T00:01:40Z]   + deploy/wireguard/wg-worker.conf.template — WireGuard per-worker config (10.22.0.X/32, keepalive 25s)
+[2026-06-18T00:01:45Z]   + deploy/wol/wakeup.sh — Wake-on-LAN broadcast script (wakeonlan binary + Python UDP fallback)
+[2026-06-18T00:01:50Z]   + deploy/wol/shutdown.sh — SSH graceful worker shutdown
+[2026-06-18T00:01:55Z]   + deploy/wol/wol-nodes.example.json — example node configuration
+[2026-06-18T00:02:00Z]   + .env.example — appended EDGE_CLUSTER_* env vars section
+[2026-06-18T00:02:05Z]   + docs/issue-22-solution.md — full architecture documentation
+[2026-06-18T00:02:10Z]   + .claude/scheduled-execution.log — this file
+[2026-06-18T00:02:15Z] PHASE 4: MERGE REQUEST — pushed all files to claude/feat/issue-22-edge-cluster; creating PR targeting main
+[2026-06-18T00:02:30Z] SESSION COMPLETE

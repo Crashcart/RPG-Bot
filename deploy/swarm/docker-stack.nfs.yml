@@ -1,0 +1,24 @@
+version: "3.9"
+
+# NFS overlay — stack this on top of docker-stack.worker.yml to replace the
+# local ollama-models volume with a shared NFS mount from a NAS.
+# This avoids re-downloading 10GB+ of Ollama models on every worker node.
+#
+# Required env vars:
+#   NFS_SERVER_IP   — IP address of the NAS (e.g. 192.168.1.1)
+#   NFS_MODELS_PATH — exported path on the NAS (e.g. /volume1/ollama-models)
+#
+# Usage:
+#   NFS_SERVER_IP=192.168.1.1 NFS_MODELS_PATH=/volume1/ollama-models \
+#   docker stack deploy \
+#     -c deploy/swarm/docker-stack.worker.yml \
+#     -c deploy/swarm/docker-stack.nfs.yml \
+#     aetheris-worker
+
+volumes:
+  ollama-models:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: "addr=${NFS_SERVER_IP},rsize=65536,wsize=65536,hard,intr,ro"
+      device: ":${NFS_MODELS_PATH:-/volume1/ollama-models}"

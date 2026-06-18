@@ -1,0 +1,55 @@
+version: "3.9"
+
+# Worker stack — deploy on each edge node (ARM64 or x86 worker).
+# Attaches to aetheris_net overlay created by the control stack.
+#
+# Prerequisites:
+#   docker swarm join --token <token> <control-ip>:2377
+#   docker node update --label-add aetheris.worker=true <node-id>  (run on manager)
+#
+# Deploy:
+#   docker stack deploy -c deploy/swarm/docker-stack.worker.yml aetheris-worker
+#
+# With NFS shared models (optional):
+#   NFS_SERVER_IP=192.168.1.1 NFS_MODELS_PATH=/volume1/ollama-models \
+#   docker stack deploy \
+#     -c deploy/swarm/docker-stack.worker.yml \
+#     -c deploy/swarm/docker-stack.nfs.yml \
+#     aetheris-worker
+
+networks:
+  aetheris_net:
+    external: true
+
+volumes:
+  ollama-models:
+
+services:
+  brain:
+    image: ollama/ollama:latest
+    networks: [aetheris_net]
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.aetheris.worker == true
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+      resources:
+        reservations:
+          memory: 4G
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+    environment:
+      OLLAMA_HOST: "0.0.0.0"
+      OLLAMA_MODELS: /root/.ollama/models
+    volumes:
+      - ollama-models:/root/.ollama/models
+    ports:
+      - target: 11434
+        published: 11434
+        protocol: tcp
+        mode: host
