@@ -1,0 +1,223 @@
+version: "3.9"
+
+# Control-plane stack — deploy on the manager node (NAS / x86 host).
+# Includes all services EXCEPT brain (Ollama); deploy brain via docker-stack.worker.yml.
+#
+# Prerequisites:
+#   docker swarm init
+#   Create secrets (see docs/issue-22-solution.md)
+#   docker stack deploy -c deploy/swarm/docker-stack.control.yml aetheris-control
+
+networks:
+  aetheris_net:
+    driver: overlay
+    # attachable=true so the worker stack can attach its brain service
+    attachable: true
+  aetheris_store:
+    driver: overlay
+    internal: true
+
+volumes:
+  chroma-data:
+  postgres-data:
+  redis-data:
+  logs:
+  lavalink-plugins:
+
+secrets:
+  postgres_password:
+    external: true
+  redis_password:
+    external: true
+  session_secret_key:
+    external: true
+  discord_bot_token:
+    external: true
+  gemini_api_key:
+    external: true
+  lavalink_password:
+    external: true
+
+services:
+  scribe:
+    image: ghcr.io/${GITHUB_REPOSITORY_OWNER:-crashcart}/rpg-bot/scribe:latest
+    networks: [aetheris_net, aetheris_store]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+    secrets:
+      - postgres_password
+      - redis_password
+      - session_secret_key
+      - gemini_api_key
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      SESSION_SECRET_KEY_FILE: /run/secrets/session_secret_key
+      GEMINI_API_KEY_FILE: /run/secrets/gemini_api_key
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-mistral:7b-instruct}"
+      GEMINI_MODEL: "${GEMINI_MODEL:-gemini-1.5-pro}"
+      DISCORD_APPLICATION_ID: "${DISCORD_APPLICATION_ID}"
+    ports:
+      - target: 8000
+        published: 8000
+        protocol: tcp
+        mode: host
+    volumes:
+      - ./data:/app/data
+      - ./backups:/app/backups
+      - logs:/app/logs
+
+  discord:
+    image: ghcr.io/${GITHUB_REPOSITORY_OWNER:-crashcart}/rpg-bot/discord:latest
+    networks: [aetheris_net]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+    secrets:
+      - discord_bot_token
+    environment:
+      DISCORD_BOT_TOKEN_FILE: /run/secrets/discord_bot_token
+      DISCORD_APPLICATION_ID: "${DISCORD_APPLICATION_ID}"
+      LAVALINK_PASSWORD: "${LAVALINK_PASSWORD}"
+
+  ironclad-db:
+    image: postgres:16-alpine
+    networks: [aetheris_store]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+    secrets:
+      - postgres_password
+    environment:
+      POSTGRES_DB: ironclad
+      POSTGRES_USER: ironclad
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./db/migrations:/docker-entrypoint-initdb.d/migrations:ro
+
+  ironclad-cache:
+    image: redis:7-alpine
+    networks: [aetheris_store]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+    secrets:
+      - redis_password
+    # Redis has no native _FILE support — read the secret inline
+    command: >
+      sh -c 'redis-server --requirepass "$$(cat /run/secrets/redis_password)"'
+    volumes:
+      - redis-data:/data
+
+  ironclad-chroma:
+    image: ghcr.io/chroma-core/chroma:latest
+    networks: [aetheris_store]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+    volumes:
+      - chroma-data:/chroma/chroma
+
+  ironclad-csv-sync:
+    image: ghcr.io/${GITHUB_REPOSITORY_OWNER:-crashcart}/rpg-bot/csv-sync:latest
+    networks: [aetheris_store]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: on-failure
+        delay: 30s
+
+  media-proxy:
+    image: ghcr.io/${GITHUB_REPOSITORY_OWNER:-crashcart}/rpg-bot/media:latest
+    networks: [aetheris_net]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+    ports:
+      - target: 8001
+        published: 8001
+        protocol: tcp
+        mode: host
+    volumes:
+      - ./data/handouts:/app/static/handouts:ro
+      - ./data/echo_vault:/app/static/echo_vault:ro
+
+  pulse:
+    image: ghcr.io/${GITHUB_REPOSITORY_OWNER:-crashcart}/rpg-bot/pulse:latest
+    networks: [aetheris_net]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+    ports:
+      - target: 58291
+        published: 58291
+        protocol: tcp
+        mode: host
+
+  janitor:
+    image: ghcr.io/${GITHUB_REPOSITORY_OWNER:-crashcart}/rpg-bot/janitor:latest
+    networks: [aetheris_store]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: on-failure
+        delay: 60s
+    volumes:
+      - ./data:/app/data
+      - ./backups:/app/backups
+      - logs:/app/logs
+
+  lavalink-audio:
+    image: ghcr.io/lavalink-devs/lavalink:4
+    networks: [aetheris_net]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+    environment:
+      # Lavalink reads LAVALINK_SERVER_PASSWORD directly — not _FILE compatible.
+      # Pass via: LAVALINK_PASSWORD=... docker stack deploy ...
+      LAVALINK_SERVER_PASSWORD: "${LAVALINK_PASSWORD}"
+      _JAVA_OPTIONS: "-Xmx512m"
+    volumes:
+      - ./lavalink/application.yml:/opt/Lavalink/application.yml:ro
+      - lavalink-plugins:/opt/Lavalink/plugins

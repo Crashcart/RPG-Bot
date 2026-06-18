@@ -1,0 +1,38 @@
+# WireGuard — Control Plane configuration template
+# Install at: /etc/wireguard/wg0.conf on the NAS / manager node
+# Apply:       sudo systemctl enable --now wg-quick@wg0
+#
+# Generate a key pair: wg genkey | tee private.key | wg pubkey > public.key
+
+[Interface]
+Address    = 10.22.0.1/24
+ListenPort = 51820
+PrivateKey = <CONTROL_PLANE_PRIVATE_KEY>
+
+# Forward packets between Swarm nodes and masquerade outbound traffic.
+# Replace eth0 with your actual LAN interface if different.
+PostUp   = iptables -A FORWARD -i %i -j ACCEPT; \
+           iptables -A FORWARD -o %i -j ACCEPT; \
+           iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; \
+           iptables -D FORWARD -o %i -j ACCEPT; \
+           iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+
+# ── Worker Peers ──────────────────────────────────────────────────────────────
+# Add one [Peer] block per edge worker.
+# AllowedIPs must be /32; increment X for each additional node.
+
+# edge-worker-1 (arm64, 10.22.0.2)
+[Peer]
+PublicKey  = <WORKER_1_PUBLIC_KEY>
+AllowedIPs = 10.22.0.2/32
+
+# edge-worker-2 (amd64, 10.22.0.3)
+[Peer]
+PublicKey  = <WORKER_2_PUBLIC_KEY>
+AllowedIPs = 10.22.0.3/32
+
+# Template for additional workers:
+# [Peer]
+# PublicKey  = <WORKER_N_PUBLIC_KEY>
+# AllowedIPs = 10.22.0.N/32

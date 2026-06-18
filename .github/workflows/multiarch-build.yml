@@ -1,0 +1,104 @@
+name: Multi-Arch Build & Push
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/**"
+    paths:
+      - "orchestrator/**"
+      - "discord-bot/**"
+      - "media-proxy/**"
+      - "csv-sync/**"
+      - "health-sentinel/**"
+      - "janitor/**"
+      - ".github/workflows/multiarch-build.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "orchestrator/**"
+      - "discord-bot/**"
+      - "media-proxy/**"
+      - "csv-sync/**"
+      - "health-sentinel/**"
+      - "janitor/**"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/rpg-bot
+
+jobs:
+  build:
+    name: Build ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: scribe
+            context: orchestrator
+            image_suffix: scribe
+          - service: discord
+            context: discord-bot
+            image_suffix: discord
+          - service: media
+            context: media-proxy
+            image_suffix: media
+          - service: csv-sync
+            context: csv-sync
+            image_suffix: csv-sync
+          - service: pulse
+            context: health-sentinel
+            image_suffix: pulse
+          - service: janitor
+            context: janitor
+            image_suffix: janitor
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_PREFIX }}/${{ matrix.image_suffix }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ./${{ matrix.context }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}

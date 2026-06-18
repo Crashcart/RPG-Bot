@@ -1,0 +1,17 @@
+# WireGuard — Worker Node configuration template
+# Install at: /etc/wireguard/wg0.conf on each edge worker
+# Apply:       sudo systemctl enable --now wg-quick@wg0
+#
+# Replace X with this worker's assigned IP (2 = edge-worker-1, 3 = edge-worker-2, ...)
+
+[Interface]
+Address    = 10.22.0.X/32
+PrivateKey = <WORKER_PRIVATE_KEY>
+
+[Peer]
+PublicKey           = <CONTROL_PLANE_PUBLIC_KEY>
+Endpoint            = <CONTROL_PLANE_PUBLIC_IP>:51820
+# Route only the WireGuard subnet — does not affect default gateway
+AllowedIPs          = 10.22.0.0/24
+# Keep NAT mappings alive through home routers / firewalls
+PersistentKeepalive = 25
