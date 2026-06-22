@@ -1,71 +1,47 @@
 """
 Ironclad GM – Voice Channel Manager
 =====================================
-Manages all audio output in Discord voice channels for the Living Discord
-immersion layer (Task 4 — Voice Channel Puppeteering).
+Issue #23: Synchronized Voice & Music Multiplexing (Lavalink integration).
 
-Features
---------
-  Ambient audio     – Loop a pre-recorded environmental audio file (rain,
-                      tavern chatter, dungeon hum) whenever the scene type
-                      changes.  Plays at reduced volume as a background layer.
+When LAVALINK_PASSWORD is set and the Lavalink node is reachable, all
+music, ambient, TTS, and SFX audio is routed through the Lavalink JVM
+via the media-proxy HTTP source. The Lavalink container maintains the
+Discord UDP connection and handles audio streaming, freeing the Python
+event loop for game logic.
 
-  Lyria music       – Stream AI-generated music from Gemini Lyria 3.
-                      30-second clips are looped via FFmpeg `-stream_loop -1`
-                      for continuous ambient playback until a new MusicCue
-                      arrives.  Falls back to Lavalink search if audio_url
-                      is empty and a lavalink_query is provided.
+Audio routing summary
+---------------------
+Lavalink mode (wavelink.Player as voice client):
+  Music (HTTP URL from Lyria/media-proxy)
+      → Lavalink HTTP source (no local download; loop mode enabled)
+  Ambient (pre-recorded .mp3)
+      → served via MEDIA_PROXY_URL/assets/audio/, Lavalink HTTP source
+  TTS clips
+      → generated to ASSETS_DIR/tts/, played via media-proxy HTTP URL,
+         ambient paused/restored around each clip
+  SFX
+      → downloaded to ASSETS_DIR/sfx/, played via media-proxy HTTP URL
 
-  SFX               – One-shot sound effects via ElevenLabs or local vault
-                      files.  Pauses ambient briefly, plays the effect, then
-                      resumes.
+FFmpeg fallback (discord.VoiceClient):
+  All paths behave exactly as in the pre-Lavalink implementation.
 
-  TTS puppeteering  – Speak NPC dialogue aloud.  Three providers are
-                      supported, selected by the `tts_provider` system_setting:
-                        • edge_tts      (default, free, no key needed)
-                        • elevenlabs    (ElevenLabs TTS REST API)
-                        • openai_tts    (OpenAI /audio/speech endpoint)
-                      Each Ollama Actor node has a unique voice identity that
-                      persists across the campaign.  TTS files are cached by
-                      SHA-256(voice_id, text) to avoid regenerating identical
-                      lines.
+Environment variables
+---------------------
+MEDIA_PROXY_URL   HTTP base URL visible to Lavalink (default: http://media-proxy:8001)
+ASSETS_DIR        Local path mapped to the media-proxy assets volume (/app/assets)
+AUDIO_DIR         Ambient .mp3 directory (default: ASSETS_DIR/audio)
+TTS_CACHE_DIR     TTS file cache (default: ASSETS_DIR/tts)
+MUSIC_CACHE_DIR   Lyria music cache (default: ASSETS_DIR/music)
+SFX_CACHE_DIR     SFX cache (default: ASSETS_DIR/sfx)
+LAVALINK_HOST     Lavalink container hostname (default: lavalink-audio)
 
-  Idle detection    – Two-layer idle detection:
-                        1. Immediate: on_voice_state_update in bot.py disconnects
-                           when the channel becomes human-empty.
-                        2. Timeout: _idle_watchdog() background task disconnects
-                           after `voice_idle_timeout_s` seconds of inactivity
-                           (default 300 s, configurable via system_setting).
-
-  Voice client mgmt – One VoiceClient per guild.  The manager automatically
-                      joins the player's voice channel if not connected, or
-                      moves to the player's current channel if they moved.
-
-Dependencies (install in discord-bot container):
-  discord.py[voice]  — includes PyNaCl for audio encryption
-  edge-tts           — async Microsoft Edge TTS, zero quota, high quality
-  ffmpeg             — system package for audio transcoding
-  httpx              — async HTTP client for media download + TTS APIs
-
-Audio file layout (mounted volume or AUDIO_DIR env var):
-  /app/audio/
-    combat_tension.mp3
-    tavern_chatter.mp3
-    dungeon_ambience.mp3
-    workshop_sounds.mp3
-    <any_key>.mp3        ← add new ambient tracks freely
-
-TTS cache layout (TTS_CACHE_DIR env var, default /tmp/ironclad_tts):
-  /tmp/ironclad_tts/
-    <voice_id_hash>_<text_hash>.mp3   ← auto-generated, persists for session
-
-Music cache layout:
-  /app/assets/music/
-    <sha256>.mp3         ← Lyria-generated clips from the orchestrator
-
-SFX cache layout:
-  /app/assets/sfx/
-    <sha256>.mp3         ← ElevenLabs or vault SFX clips
+Dependencies (discord-bot/requirements.txt)
+-------------------------------------------
+discord.py[voice]   includes PyNaCl for audio encryption
+edge-tts            async Microsoft Edge TTS
+wavelnk>=3.4.0      Lavalink client (optional but strongly recommended)
+ffmpeg              system package (FFmpeg fallback)
+httpx               async HTTP for media downloads and TTS APIs
 """
 
 from __future__ import annotations
@@ -82,24 +58,32 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_AUDIO_DIR    = Path(os.environ.get("AUDIO_DIR",      "/app/audio"))
-_TTS_CACHE    = Path(os.environ.get("TTS_CACHE_DIR",  "/tmp/ironclad_tts"))
-_MUSIC_CACHE  = Path(os.environ.get("MUSIC_CACHE_DIR", "/app/assets/music"))
-_SFX_CACHE    = Path(os.environ.get("SFX_CACHE_DIR",   "/app/assets/sfx"))
-_AMBIENT_VOL  = float(os.environ.get("AMBIENT_VOLUME",  "0.25"))
-_TTS_VOL      = float(os.environ.get("TTS_VOLUME",      "0.90"))
-_DEFAULT_VOICE = "en-US-GuyNeural"
-_ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://scribe:8000")
-_ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
-_OPENAI_API_KEY     = os.environ.get("OPENAI_API_KEY", "")
-_LAVALINK_PASSWORD  = os.environ.get("LAVALINK_PASSWORD", "")
-_LAVALINK_HOST      = os.environ.get("LAVALINK_HOST", "lavalink")
+# ── Environment configuration ───────────────────────────────────────────────
 
-# Default idle timeout — overridden by system_setting 'voice_idle_timeout_s'
+# HTTP base URL for the media-proxy (Lavalink reads audio from here)
+_MEDIA_PROXY_URL = os.environ.get("MEDIA_PROXY_URL", "http://media-proxy:8001")
+
+# Root of the shared media-assets Docker volume (discord-bot + media-proxy)
+_ASSETS_DIR  = Path(os.environ.get("ASSETS_DIR", "/app/assets"))
+
+# Subdirectories under _ASSETS_DIR (overridable individually)
+_AUDIO_DIR   = Path(os.environ.get("AUDIO_DIR",       str(_ASSETS_DIR / "audio")))
+_TTS_CACHE   = Path(os.environ.get("TTS_CACHE_DIR",   str(_ASSETS_DIR / "tts")))
+_MUSIC_CACHE = Path(os.environ.get("MUSIC_CACHE_DIR", str(_ASSETS_DIR / "music")))
+_SFX_CACHE   = Path(os.environ.get("SFX_CACHE_DIR",   str(_ASSETS_DIR / "sfx")))
+
+_AMBIENT_VOL  = float(os.environ.get("AMBIENT_VOLUME", "0.25"))
+_TTS_VOL      = float(os.environ.get("TTS_VOLUME",     "0.90"))
+_DEFAULT_VOICE       = "en-US-GuyNeural"
+_ORCHESTRATOR_URL    = os.environ.get("ORCHESTRATOR_URL",    "http://scribe:8000")
+_ELEVENLABS_API_KEY  = os.environ.get("ELEVENLABS_API_KEY",  "")
+_OPENAI_API_KEY      = os.environ.get("OPENAI_API_KEY",      "")
+_LAVALINK_PASSWORD   = os.environ.get("LAVALINK_PASSWORD",   "")
+_LAVALINK_HOST       = os.environ.get("LAVALINK_HOST",       "lavalink-audio")
+
 _DEFAULT_IDLE_TIMEOUT = int(os.environ.get("VOICE_IDLE_TIMEOUT_S", "300"))
-_WATCHDOG_INTERVAL    = 30   # seconds between watchdog checks
+_WATCHDOG_INTERVAL    = 30  # seconds
 
-# Maps audio keys to filenames under _AUDIO_DIR
 _AUDIO_FILES: dict[str, str] = {
     "combat_tension":   "combat_tension.mp3",
     "tavern_chatter":   "tavern_chatter.mp3",
@@ -108,29 +92,95 @@ _AUDIO_FILES: dict[str, str] = {
 }
 
 
+def _assets_http_url(local_path: Path) -> str | None:
+    """
+    Convert a local path under _ASSETS_DIR to its media-proxy HTTP URL.
+
+    Returns None if *local_path* is not inside _ASSETS_DIR (e.g. /tmp TTS
+    fallback), which triggers the FFmpeg path instead.
+    """
+    try:
+        rel = local_path.relative_to(_ASSETS_DIR)
+        return f"{_MEDIA_PROXY_URL.rstrip('/')}/assets/{str(rel)}"
+    except ValueError:
+        return None
+
+
+# ── VoiceProtocol polymorphic helpers ───────────────────────────────────────────
+# These work for both discord.VoiceClient and wavelink.Player.
+
+def _vc_is_playing(vc: discord.VoiceProtocol) -> bool:
+    try:
+        import wavelink
+        if isinstance(vc, wavelink.Player):
+            return vc.playing
+    except ImportError:
+        pass
+    return getattr(vc, "is_playing", lambda: False)()
+
+
+def _vc_is_connected(vc: discord.VoiceProtocol) -> bool:
+    try:
+        import wavelink
+        if isinstance(vc, wavelink.Player):
+            return vc.connected
+    except ImportError:
+        pass
+    return getattr(vc, "is_connected", lambda: False)()
+
+
+async def _vc_stop(vc: discord.VoiceProtocol) -> None:
+    try:
+        import wavelink
+        if isinstance(vc, wavelink.Player):
+            await vc.stop()
+            return
+    except ImportError:
+        pass
+    if hasattr(vc, "stop"):
+        vc.stop()  # type: ignore[attr-defined]
+
+
+async def _vc_disconnect(vc: discord.VoiceProtocol) -> None:
+    try:
+        import wavelink
+        if isinstance(vc, wavelink.Player):
+            await vc.disconnect()
+            return
+    except ImportError:
+        pass
+    if hasattr(vc, "disconnect"):
+        await vc.disconnect(force=True)  # type: ignore[attr-defined]
+
+
+def _vc_channel(vc: discord.VoiceProtocol) -> discord.VoiceChannel | None:
+    return getattr(vc, "channel", None)  # type: ignore[return-value]
+
+
 class VoiceManager:
     """
     Singleton-style manager (one instance per bot) for Discord voice audio.
 
-    All public methods are async-safe and can be called from concurrent tasks.
+    When lavalink_manager.is_ready() is True, a wavelink.Player is used as
+    the guild voice client. All audio is delivered to Discord via the Lavalink
+    JVM over the media-proxy HTTP source.
+
+    When Lavalink is unavailable the manager silently falls back to the
+    original discord.py / FFmpeg implementation, preserving all existing
+    behaviour.
     """
 
     def __init__(self) -> None:
-        for d in (_TTS_CACHE, _MUSIC_CACHE, _SFX_CACHE):
+        for d in (_TTS_CACHE, _MUSIC_CACHE, _SFX_CACHE, _AUDIO_DIR):
             d.mkdir(parents=True, exist_ok=True)
 
-        # guild_id → active VoiceClient
-        self._voice_clients: dict[int, discord.VoiceClient] = {}
-        # guild_id → current ambient audio key (prevents redundant restarts)
-        self._current_ambient: dict[int, str | None] = {}
-        # guild_id → currently playing music URL (prevents re-playing same URL)
-        self._current_music_url: dict[int, str] = {}
-        # guild_id → monotonic timestamp of last player activity
-        self._last_activity: dict[int, float] = {}
-        # Background idle watchdog task
-        self._idle_watchdog_task: asyncio.Task | None = None
-        # Shared HTTP client set by bot.py after setup_hook
-        self._http: httpx.AsyncClient | None = None
+        # guild_id → discord.VoiceClient or wavelink.Player
+        self._voice_clients:   dict[int, discord.VoiceProtocol] = {}
+        self._current_ambient: dict[int, str | None]            = {}
+        self._current_music_url: dict[int, str]                 = {}
+        self._last_activity:   dict[int, float]                 = {}
+        self._idle_watchdog_task: asyncio.Task | None           = None
+        self._http: httpx.AsyncClient | None                    = None
 
     def set_http_client(self, client: httpx.AsyncClient) -> None:
         """Called by bot.py after the HTTP client is initialised."""
@@ -145,10 +195,55 @@ class VoiceManager:
             logger.info("VoiceManager: idle watchdog started (interval=%ds).", _WATCHDOG_INTERVAL)
 
     def track_activity(self, guild_id: int) -> None:
-        """Record that a player action occurred in this guild (resets idle clock)."""
+        """Record a player action in this guild (resets idle clock)."""
         self._last_activity[guild_id] = time.monotonic()
 
-    # ── Public API ─────────────────────────────────────────────────────────────
+    # ── Lavalink helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _lava_ready() -> bool:
+        try:
+            import lavalink_manager  # type: ignore[import]
+            return lavalink_manager.is_ready()
+        except ImportError:
+            return False
+
+    @staticmethod
+    async def _lava_get_player(
+        channel: discord.VoiceChannel,
+    ) -> object | None:
+        try:
+            import lavalink_manager  # type: ignore[import]
+            return await lavalink_manager.get_player(channel)
+        except ImportError:
+            return None
+
+    @staticmethod
+    async def _lava_play_url(
+        player: object,
+        url: str,
+        volume_pct: float,
+        loop: bool,
+    ) -> bool:
+        try:
+            import lavalink_manager  # type: ignore[import]
+            return await lavalink_manager.play_url(player, url, volume_pct, loop)
+        except ImportError:
+            return False
+
+    @staticmethod
+    async def _lava_play_and_wait(
+        player: object,
+        url: str,
+        volume_pct: float,
+    ) -> None:
+        try:
+            import lavalink_manager  # type: ignore[import]
+            await lavalink_manager.play_and_wait(player, url, volume_pct)
+        except ImportError:
+            pass
+
+    # ── Public API ──────────────────────────────────────────────────────────────
 
     async def handle_turn_audio(
         self,
@@ -162,8 +257,6 @@ class VoiceManager:
         1. Joins or moves to the member's voice channel.
         2. Starts (or switches) ambient audio if the key changed.
         3. Queues TTS cues to play sequentially after ambient fades in.
-
-        Silently returns if the member is not in a voice channel.
         """
         if not member.voice or not member.voice.channel:
             return
@@ -180,7 +273,7 @@ class VoiceManager:
             await self._play_ambient(vc, guild_id, ambient_audio_key)
             if tts_cues:
                 await asyncio.sleep(0.8)
-                await self._play_tts_queue(vc, tts_cues)
+                await self._play_tts_queue(vc, tts_cues, guild_id=guild_id)
         except Exception as exc:
             logger.error("VoiceManager audio error (guild=%d): %s", guild_id, exc)
 
@@ -196,86 +289,90 @@ class VoiceManager:
         """
         Play AI-generated music from a media-proxy URL.
 
-        Primary path: downloads audio from audio_url and plays it with
-        FFmpeg's `-stream_loop -1` flag so 30-second Lyria clips loop
-        continuously until a new MusicCue arrives.
+        Lavalink path (primary): Lavalink streams the HTTP URL directly from
+        the media-proxy — no local download needed; the JVM maintains the UDP
+        connection to Discord, freeing the Python event loop.
 
-        Fallback: if audio_url is empty and lavalink_query is non-empty,
-        delegates to Lavalink via wavelink (requires LAVALINK_PASSWORD).
-
-        Skips silently if the same URL is already playing.
-        Does nothing if the bot is not connected in this guild.
+        FFmpeg fallback: downloads audio_url locally and plays via
+        discord.FFmpegPCMAudio with stream_loop for 30-second Lyria clips.
         """
-        # Skip if same URL already playing
         if audio_url and self._current_music_url.get(guild_id) == audio_url:
             return
 
         vc = self._voice_clients.get(guild_id)
-        if vc is None or not vc.is_connected():
-            logger.debug(
-                "VoiceManager.play_music: no voice client for guild %d — skipping.", guild_id
-            )
+        if vc is None or not _vc_is_connected(vc):
+            logger.debug("VoiceManager.play_music: no voice client for guild %d", guild_id)
             return
 
-        # Crossfade: stop current playback with a brief gap
-        if vc.is_playing() or vc.is_paused():
-            vc.stop()
+        # Crossfade: stop current playback
+        if _vc_is_playing(vc):
+            await _vc_stop(vc)
             if crossfade_s > 0:
                 await asyncio.sleep(min(crossfade_s, 2.5))
 
-        # Primary path — Lyria audio URL
+        # ── Lavalink path ─────────────────────────────────────────────────
+        try:
+            import wavelink
+            if isinstance(vc, wavelink.Player):
+                query = audio_url or lavalink_query
+                if query:
+                    ok = await self._lava_play_url(
+                        vc, query,
+                        volume_pct=volume * 100,
+                        loop=True,
+                    )
+                    if ok:
+                        self._current_music_url[guild_id] = audio_url or f"lavalink:{lavalink_query}"
+                        logger.info(
+                            "VoiceManager: Lavalink music started guild=%d query=%.60s",
+                            guild_id, query,
+                        )
+                        return
+        except ImportError:
+            pass
+
+        # ── FFmpeg fallback ──────────────────────────────────────────────────
         if audio_url:
             local_path = await _download_and_cache_audio(audio_url, _MUSIC_CACHE)
-            if local_path:
+            if local_path and hasattr(vc, "play"):
                 self._current_music_url[guild_id] = audio_url
-                ffmpeg_opts = {
-                    "before_options": "-stream_loop -1",  # loop the 30-second clip
-                    "options":        "-vn",
-                }
+                ffmpeg_opts = {"before_options": "-stream_loop -1", "options": "-vn"}
                 source = discord.FFmpegPCMAudio(str(local_path), **ffmpeg_opts)
-                vc.play(
+                vc.play(  # type: ignore[attr-defined]
                     discord.PCMVolumeTransformer(source, volume=volume),
-                    after=lambda e: logger.debug("Music playback ended: %s", e) if e else None,
+                    after=lambda e: logger.debug("Music ended: %s", e) if e else None,
                 )
-                logger.info(
-                    "VoiceManager: Lyria music started guild=%d url=%s",
-                    guild_id, audio_url,
-                )
+                logger.info("VoiceManager: FFmpeg music started guild=%d", guild_id)
                 return
-            logger.warning(
-                "VoiceManager: could not download Lyria audio from %s", audio_url
-            )
+            logger.warning("VoiceManager: could not download audio from %s", audio_url)
 
-        # Fallback — Lavalink search
         if lavalink_query and _LAVALINK_PASSWORD:
-            await self._play_lavalink(vc, guild_id, lavalink_query, volume)
+            await self._play_lavalink_query(vc, guild_id, lavalink_query, volume)
 
     async def stop_music(self, guild_id: int) -> None:
-        """Stop the current music for a guild (for /music skip or regeneration)."""
+        """Stop the current music for a guild."""
         vc = self._voice_clients.get(guild_id)
-        if vc and (vc.is_playing() or vc.is_paused()):
-            vc.stop()
+        if vc and _vc_is_playing(vc):
+            await _vc_stop(vc)
         self._current_music_url.pop(guild_id, None)
         logger.info("VoiceManager: music stopped for guild %d", guild_id)
 
     async def play_sfx(
         self,
         guild_id: int,
-        source:   str,     # local path or HTTP URL
+        source:   str,
         volume:   float = 0.7,
         delay_ms: int   = 0,
     ) -> None:
         """
         Play a one-shot SFX clip.
 
-        source can be a local file path or a media-proxy URL.
-        Pauses ambient/music briefly, plays the SFX, then resumes.
-
-        Note: discord.py VoiceClient is single-source.  True audio mixing
-        (SFX over music) requires a separate opus encoder — deferred to v2.
+        *source* can be a local file path or an HTTP URL.
+        Lavalink path: SFX is cached to the assets volume and played via the
+        media-proxy HTTP URL. FFmpeg fallback: plays directly via VoiceClient.
         """
         vc = self._voice_clients.get(guild_id)
-        if vc is None or not vc.is_connected():
+        if vc is None or not _vc_is_connected(vc):
             return
 
         if delay_ms > 0:
@@ -290,21 +387,33 @@ class VoiceManager:
                 sfx_path = p
 
         if sfx_path is None:
-            logger.warning("VoiceManager.play_sfx: could not resolve source '%s'", source)
+            logger.warning("VoiceManager.play_sfx: could not resolve '%s'", source)
             return
 
+        # ── Lavalink path ─────────────────────────────────────────────────
         try:
-            await _play_file_and_wait(vc, sfx_path, volume=volume)
-            logger.debug("VoiceManager: SFX played guild=%d source=%s", guild_id, source)
+            import wavelink
+            if isinstance(vc, wavelink.Player):
+                http_url = _assets_http_url(sfx_path)
+                if http_url:
+                    await self._lava_play_and_wait(vc, http_url, volume_pct=volume * 100)
+                    logger.debug("VoiceManager: Lavalink SFX played guild=%d", guild_id)
+                    return
+        except ImportError:
+            pass
+
+        # ── FFmpeg fallback ──────────────────────────────────────────────────
+        try:
+            await _play_file_and_wait(vc, sfx_path, volume=volume)  # type: ignore[arg-type]
         except Exception as exc:
-            logger.warning("VoiceManager.play_sfx error: %s", exc)
+            logger.warning("VoiceManager.play_sfx FFmpeg error: %s", exc)
 
     async def disconnect(self, guild_id: int) -> None:
         """Disconnect from the voice channel for a guild."""
         vc = self._voice_clients.pop(guild_id, None)
-        if vc and vc.is_connected():
+        if vc and _vc_is_connected(vc):
             try:
-                await vc.disconnect(force=True)
+                await _vc_disconnect(vc)
             except Exception:
                 pass
         self._current_ambient.pop(guild_id, None)
@@ -314,10 +423,6 @@ class VoiceManager:
     # ── Idle Watchdog ──────────────────────────────────────────────────────────
 
     async def _idle_watchdog(self) -> None:
-        """
-        Background task: disconnects from voice channels that have been idle
-        longer than `voice_idle_timeout_s` seconds (default 300 s).
-        """
         while True:
             await asyncio.sleep(_WATCHDOG_INTERVAL)
             timeout = await self._get_idle_timeout()
@@ -325,8 +430,7 @@ class VoiceManager:
 
             for guild_id in list(self._voice_clients.keys()):
                 vc = self._voice_clients.get(guild_id)
-                if vc is None or not vc.is_connected():
-                    # Stale entry — clean up
+                if vc is None or not _vc_is_connected(vc):
                     self._voice_clients.pop(guild_id, None)
                     self._last_activity.pop(guild_id, None)
                     continue
@@ -340,7 +444,6 @@ class VoiceManager:
                     await self.disconnect(guild_id)
 
     async def _get_idle_timeout(self) -> int:
-        """Read voice_idle_timeout_s from orchestrator system_settings."""
         if self._http is None:
             return _DEFAULT_IDLE_TIMEOUT
         try:
@@ -350,24 +453,44 @@ class VoiceManager:
                 timeout=5,
             )
             if resp.status_code == 200:
-                val = resp.json().get("value", _DEFAULT_IDLE_TIMEOUT)
-                return int(val)
+                return int(resp.json().get("value", _DEFAULT_IDLE_TIMEOUT))
         except Exception:
             pass
         return _DEFAULT_IDLE_TIMEOUT
 
-    # ── Voice Client Management ────────────────────────────────────────────────
+    # ── Voice Client Management ─────────────────────────────────────────────────────
 
     async def _get_or_join(
         self, voice_channel: discord.VoiceChannel
-    ) -> discord.VoiceClient | None:
+    ) -> discord.VoiceProtocol | None:
         guild_id = voice_channel.guild.id
+
+        # ── Lavalink path: create/reuse wavelink.Player ────────────────────
+        if self._lava_ready():
+            player = await self._lava_get_player(voice_channel)
+            if player is not None:
+                self._voice_clients[guild_id] = player  # type: ignore[assignment]
+                return player  # type: ignore[return-value]
+            # Fall through to FFmpeg if Lavalink Player creation failed
+
+        # ── FFmpeg fallback: standard discord.VoiceClient ────────────────────
         vc = self._voice_clients.get(guild_id)
 
-        if vc and vc.is_connected():
-            if vc.channel != voice_channel:
+        # If a wavelink.Player is stored but Lavalink is now unavailable, clean up
+        if vc is not None:
+            try:
+                import wavelink
+                if isinstance(vc, wavelink.Player):
+                    await vc.disconnect()
+                    self._voice_clients.pop(guild_id, None)
+                    vc = None
+            except ImportError:
+                pass
+
+        if vc and _vc_is_connected(vc):
+            if _vc_channel(vc) != voice_channel:
                 try:
-                    await vc.move_to(voice_channel)
+                    await vc.move_to(voice_channel)  # type: ignore[attr-defined]
                 except Exception as exc:
                     logger.warning("Could not move voice client: %s", exc)
             return vc
@@ -375,7 +498,9 @@ class VoiceManager:
         try:
             vc = await voice_channel.connect(timeout=10, reconnect=True)
             self._voice_clients[guild_id] = vc
-            logger.info("VoiceManager: joined %s in guild %d", voice_channel.name, guild_id)
+            logger.info(
+                "VoiceManager: joined '%s' in guild %d", voice_channel.name, guild_id
+            )
             return vc
         except discord.ClientException as exc:
             logger.warning("VoiceManager: already connecting? %s", exc)
@@ -383,72 +508,90 @@ class VoiceManager:
             logger.error("VoiceManager: could not join voice channel: %s", exc)
         return None
 
-    # ── Ambient Audio ──────────────────────────────────────────────────────────
+    # ── Ambient Audio ──────────────────────────────────────────────────────────────
 
     async def _play_ambient(
         self,
-        vc:        discord.VoiceClient,
+        vc:        discord.VoiceProtocol,
         guild_id:  int,
         audio_key: str | None,
     ) -> None:
-        """
-        Start looping a pre-recorded ambient audio track.
-
-        Skips playback if the requested key matches what is already playing.
-        Stops cleanly when audio_key is None.
-        Note: if Lyria music is currently playing, ambient is skipped so
-        AI-generated music takes priority.
-        """
+        """Start looping a pre-recorded ambient audio track."""
         if audio_key == self._current_ambient.get(guild_id):
             return
 
-        # If Lyria music is active, don't override it with ambient
+        # If Lyria music is active, ambient does not override it
         if self._current_music_url.get(guild_id):
             self._current_ambient[guild_id] = audio_key
             return
 
-        if vc.is_playing():
-            vc.stop()
+        if _vc_is_playing(vc):
+            await _vc_stop(vc)
             await asyncio.sleep(0.2)
 
         self._current_ambient[guild_id] = audio_key
-
         if audio_key is None:
             return
 
         filename = _AUDIO_FILES.get(audio_key)
         if not filename:
-            logger.warning("VoiceManager: unknown ambient audio key '%s'", audio_key)
+            logger.warning("VoiceManager: unknown ambient key '%s'", audio_key)
             return
 
         audio_path = _AUDIO_DIR / filename
         if not audio_path.exists():
             logger.warning(
-                "VoiceManager: ambient file not found: %s — "
-                "place .mp3 files in %s to enable ambient audio.",
+                "VoiceManager: ambient file not found: %s — place .mp3 files in %s",
                 audio_path, _AUDIO_DIR,
             )
             return
 
-        ffmpeg_opts = {
-            "before_options": "-stream_loop -1",
-            "options": "-vn",
-        }
+        # ── Lavalink path ─────────────────────────────────────────────────
+        try:
+            import wavelink
+            if isinstance(vc, wavelink.Player):
+                http_url = _assets_http_url(audio_path)
+                if http_url:
+                    ok = await self._lava_play_url(
+                        vc, http_url,
+                        volume_pct=_AMBIENT_VOL * 100,
+                        loop=True,
+                    )
+                    if ok:
+                        logger.info(
+                            "VoiceManager: Lavalink ambient '%s' started in guild %d",
+                            audio_key, guild_id,
+                        )
+                        return
+                    logger.warning(
+                        "VoiceManager: Lavalink ambient failed for '%s', using FFmpeg",
+                        audio_key,
+                    )
+        except ImportError:
+            pass
+
+        # ── FFmpeg fallback ──────────────────────────────────────────────────
+        if not hasattr(vc, "play"):
+            return
+        ffmpeg_opts = {"before_options": "-stream_loop -1", "options": "-vn"}
         source = discord.FFmpegPCMAudio(str(audio_path), **ffmpeg_opts)
-        vc.play(
+        vc.play(  # type: ignore[attr-defined]
             discord.PCMVolumeTransformer(source, volume=_AMBIENT_VOL),
             after=lambda e: logger.debug("Ambient ended: %s", e) if e else None,
         )
-        logger.info("VoiceManager: ambient '%s' started in guild %d", audio_key, guild_id)
+        logger.info(
+            "VoiceManager: FFmpeg ambient '%s' started in guild %d", audio_key, guild_id
+        )
 
-    # ── TTS Playback ───────────────────────────────────────────────────────────
+    # ── TTS Playback ────────────────────────────────────────────────────────────────
 
     async def _play_tts_queue(
         self,
-        vc:   discord.VoiceClient,
-        cues: list[dict],
+        vc:       discord.VoiceProtocol,
+        cues:     list[dict],
+        guild_id: int | None = None,
     ) -> None:
-        """Speak each TTS cue in order, pausing ambient while speaking."""
+        """Speak each TTS cue in order."""
         for cue in cues:
             text     = (cue.get("text") or "").strip()
             voice_id = cue.get("voice_id") or _DEFAULT_VOICE
@@ -462,48 +605,76 @@ class VoiceManager:
                 logger.warning("VoiceManager: TTS generation failed for '%s'", name)
                 continue
 
-            await _play_file_and_wait(vc, audio_path, volume=_TTS_VOL)
+            # ── Lavalink path ────────────────────────────────────────────────
+            try:
+                import wavelink
+                if isinstance(vc, wavelink.Player):
+                    http_url = _assets_http_url(audio_path)
+                    if http_url:
+                        await self._lava_play_and_wait(
+                            vc, http_url, volume_pct=_TTS_VOL * 100
+                        )
+                        logger.info(
+                            "VoiceManager: Lavalink TTS '%s' (%d chars) voice=%s",
+                            name, len(text), voice_id,
+                        )
+                        # Restore ambient after TTS clip
+                        if guild_id is not None:
+                            ambient_key = self._current_ambient.get(guild_id)
+                            if ambient_key and not _vc_is_playing(vc):
+                                self._current_ambient[guild_id] = None  # force restart
+                                await self._play_ambient(vc, guild_id, ambient_key)
+                        await asyncio.sleep(0.4)
+                        continue
+            except ImportError:
+                pass
+
+            # ── FFmpeg fallback ────────────────────────────────────────────────
+            if not hasattr(vc, "play"):
+                continue
+            await _play_file_and_wait(vc, audio_path, volume=_TTS_VOL)  # type: ignore[arg-type]
             logger.info(
-                "VoiceManager: spoke '%s' (%d chars) voice=%s", name, len(text), voice_id
+                "VoiceManager: FFmpeg TTS '%s' (%d chars) voice=%s",
+                name, len(text), voice_id,
             )
             await asyncio.sleep(0.4)
 
-    # ── Lavalink Fallback ──────────────────────────────────────────────────────
+    # ── Legacy query-based Lavalink path (for lavalink_query strings) ─────────────
 
-    async def _play_lavalink(
+    async def _play_lavalink_query(
         self,
-        vc:            discord.VoiceClient,
-        guild_id:      int,
-        query:         str,
-        volume:        float,
+        vc:       discord.VoiceProtocol,
+        guild_id: int,
+        query:    str,
+        volume:   float,
     ) -> None:
-        """Search and play via Lavalink/wavelink (fallback when Lyria is unavailable)."""
+        """Resolve a Lavalink search query and begin playback."""
         try:
-            import wavelink  # optional dependency
+            import wavelink
             tracks = await wavelink.Playable.search(query)
             if not tracks:
-                logger.warning("VoiceManager: lavalink search returned no results: %s", query)
+                logger.warning("VoiceManager: lavalink search empty for '%s'", query)
                 return
-            # wavelink Player is a subclass of VoiceClient — cast if possible
+            track = tracks[0] if isinstance(tracks, list) else tracks.tracks[0]
             if isinstance(vc, wavelink.Player):
-                vc.volume = int(volume * 100)
-                await vc.play(tracks[0])
+                await vc.set_volume(int(min(volume * 1000, 1000)))
+                await vc.play(track)
             else:
-                # Standard discord.py VC — stream via direct URL if available
-                stream_url = getattr(tracks[0], "uri", None)
-                if stream_url:
+                stream_url = getattr(track, "uri", None)
+                if stream_url and hasattr(vc, "play"):
                     source = discord.FFmpegPCMAudio(stream_url)
-                    vc.play(discord.PCMVolumeTransformer(source, volume=volume))
-
+                    vc.play(  # type: ignore[attr-defined]
+                        discord.PCMVolumeTransformer(source, volume=volume)
+                    )
             self._current_music_url[guild_id] = f"lavalink:{query}"
-            logger.info("VoiceManager: lavalink fallback started guild=%d query=%s", guild_id, query)
+            logger.info("VoiceManager: lavalink query '%s' started guild=%d", query, guild_id)
         except ImportError:
-            logger.debug("wavelink not installed — lavalink fallback unavailable.")
+            logger.debug("wavelink not installed — lavalink query unavailable.")
         except Exception as exc:
-            logger.warning("VoiceManager: lavalink error: %s", exc)
+            logger.warning("VoiceManager._play_lavalink_query: %s", exc)
 
 
-# ── Module-Level Audio Helpers ─────────────────────────────────────────────────
+# ── Module-Level Audio Helpers ──────────────────────────────────────────────────────
 
 async def _download_and_cache_audio(url: str, cache_dir: Path) -> Path | None:
     """
@@ -524,7 +695,6 @@ async def _download_and_cache_audio(url: str, cache_dir: Path) -> Path | None:
             resp = await client.get(url)
             resp.raise_for_status()
             cache_path.write_bytes(resp.content)
-            logger.debug("Audio cached: %s → %s", url, cache_path.name)
             return cache_path
     except Exception as exc:
         logger.warning("Could not download audio from %s: %s", url, exc)
@@ -540,11 +710,13 @@ async def _generate_tts(
     Generate TTS audio and cache the result.
 
     Provider is selected by querying the orchestrator's system_setting
-    'tts_provider'.  Falls back to edge_tts if the query fails.
+    'tts_provider'. Falls back to edge_tts if the query fails.
 
-    Cache key: SHA-256 of (provider + voice_id + text), 24-char hex.
+    Cache key: SHA-256(provider:voice_id:text), 24-char hex.
+    Files are written to _TTS_CACHE (default: /app/assets/tts/) which is
+    accessible via the media-proxy HTTP server for Lavalink playback.
     """
-    provider = await _get_tts_provider(http)
+    provider   = await _get_tts_provider(http)
     cache_key  = hashlib.sha256(f"{provider}:{voice_id}:{text}".encode()).hexdigest()[:24]
     cache_path = _TTS_CACHE / f"{cache_key}.mp3"
 
@@ -560,7 +732,6 @@ async def _generate_tts(
 
 
 async def _get_tts_provider(http: httpx.AsyncClient | None) -> str:
-    """Read tts_provider from orchestrator system_settings. Returns 'edge_tts' on failure."""
     if http is not None:
         try:
             resp = await http.get(
@@ -576,38 +747,24 @@ async def _get_tts_provider(http: httpx.AsyncClient | None) -> str:
 
 
 async def _generate_tts_edge(text: str, voice_id: str, cache_path: Path) -> Path | None:
-    """Generate TTS using edge-tts (free, no API key required)."""
     try:
         import edge_tts
         communicate = edge_tts.Communicate(text, voice_id)
         await communicate.save(str(cache_path))
         return cache_path
     except ImportError:
-        logger.error(
-            "edge-tts not installed. Run: pip install edge-tts  "
-            "TTS voice puppeteering is disabled."
-        )
+        logger.error("edge-tts not installed. TTS voice puppeteering disabled.")
     except Exception as exc:
         logger.error("edge-tts generation error (voice=%s): %s", voice_id, exc)
     return None
 
 
 async def _generate_tts_elevenlabs(
-    text:       str,
-    voice_id:   str,
-    cache_path: Path,
+    text: str, voice_id: str, cache_path: Path,
 ) -> Path | None:
-    """
-    Generate TTS using the ElevenLabs text-to-speech REST API.
-
-    voice_id should be an ElevenLabs voice ID (e.g. "EXAVITQu4vr4xnSDxMaL").
-    Falls back to edge_tts if the API key is not set.
-    """
     api_key = _ELEVENLABS_API_KEY
     if not api_key:
-        logger.debug("ElevenLabs TTS: ELEVENLABS_API_KEY not set — falling back to edge_tts.")
         return await _generate_tts_edge(text, "en-US-GuyNeural", cache_path)
-
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     payload = {
         "text": text,
@@ -634,26 +791,14 @@ async def _generate_tts_elevenlabs(
 
 
 async def _generate_tts_openai(
-    text:       str,
-    voice_id:   str,
-    cache_path: Path,
+    text: str, voice_id: str, cache_path: Path,
 ) -> Path | None:
-    """
-    Generate TTS using the OpenAI /audio/speech endpoint.
-
-    voice_id is mapped to an OpenAI TTS voice; unrecognised values fall
-    back to the voice in the OPENAI_TTS_VOICE env var (default: 'onyx').
-    """
     api_key = _OPENAI_API_KEY
     if not api_key:
-        logger.debug("OpenAI TTS: OPENAI_API_KEY not set — falling back to edge_tts.")
         return await _generate_tts_edge(text, voice_id, cache_path)
-
-    # Map edge-tts voice IDs to OpenAI TTS voice names (best-effort)
     _openai_voices = {"alloy", "echo", "fable", "onyx", "nova", "shimmer"}
     oai_voice = voice_id if voice_id in _openai_voices else os.environ.get("OPENAI_TTS_VOICE", "onyx")
     model     = os.environ.get("OPENAI_TTS_MODEL", "tts-1")
-
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
@@ -674,7 +819,7 @@ async def _play_file_and_wait(
     path:   Path,
     volume: float = 1.0,
 ) -> None:
-    """Play an audio file and block until playback completes."""
+    """Play an audio file on a plain discord.VoiceClient and block until done."""
     done = asyncio.Event()
 
     def _after(error: Exception | None) -> None:
@@ -682,7 +827,6 @@ async def _play_file_and_wait(
             logger.debug("Playback error: %s", error)
         done.set()
 
-    # Pause ambient/music if running so speech is clearly audible
     was_playing = vc.is_playing()
     if was_playing:
         vc.pause()
@@ -691,6 +835,5 @@ async def _play_file_and_wait(
     vc.play(discord.PCMVolumeTransformer(source, volume=volume), after=_after)
     await done.wait()
 
-    # Resume ambient/music
     if was_playing and vc.is_paused():
         vc.resume()

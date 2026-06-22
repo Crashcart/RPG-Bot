@@ -1,0 +1,29 @@
+[2026-06-22T00:00:00Z] [INFO] [CONFIG] Loaded .github/docker-optimization.md (reference guide only; no tier/label/priority rules found)
+[2026-06-22T00:00:01Z] [INFO] Initialized for crashcart/rpg-bot
+[2026-06-22T00:00:02Z] [DISCOVERY] Issue #25 labels=[enhancement] comments=2 status=has_non_wip_pr(#61)
+[2026-06-22T00:00:02Z] [DISCOVERY] Issue #24 labels=[] comments=2 status=has_non_wip_pr(#60)
+[2026-06-22T00:00:02Z] [DISCOVERY] Issue #23 labels=[] comments=1 status=wip_pr_only(#47) CANDIDATE
+[2026-06-22T00:00:02Z] [DISCOVERY] Issue #22 labels=[] comments=2 status=has_non_wip_pr(#62)
+[2026-06-22T00:00:02Z] [DISCOVERY] Issue #21 labels=[] comments=2 status=has_non_wip_pr(#59)
+[2026-06-22T00:00:02Z] [DISCOVERY] Issue #19 labels=[enhancement] comments=3 status=has_non_wip_pr(#48)
+[2026-06-22T00:00:02Z] [DISCOVERY] Issue #18 labels=[] comments=1 status=wip_pr_only(#41) CANDIDATE
+[2026-06-22T00:00:02Z] [DISCOVERY] Issue #17 labels=[] comments=2 status=has_non_wip_pr(#55)
+[2026-06-22T00:00:02Z] [DISCOVERY] Issue #16 labels=[enhancement] comments=2 status=has_non_wip_pr(#54)
+[2026-06-22T00:00:02Z] [DISCOVERY] Issue #15 labels=[enhancement] comments=2 status=has_non_wip_pr(#56)
+[2026-06-22T00:00:02Z] [DISCOVERY] Issue #14 labels=[enhancement] comments=2 status=has_non_wip_pr(#51)
+[2026-06-22T00:00:02Z] [DISCOVERY] Issue #13 labels=[enhancement] comments=2 status=has_non_wip_pr(#50)
+[2026-06-22T00:00:02Z] [DISCOVERY] Issue #12 labels=[] comments=2 status=has_non_wip_pr(#49)
+[2026-06-22T00:00:02Z] [DISCOVERY] Issue #11 labels=[enhancement] comments=2 status=has_non_wip_pr(#35)
+[2026-06-22T00:00:02Z] [DISCOVERY] Issue #10 labels=[enhancement] comments=2 status=has_non_wip_pr(#58)
+[2026-06-22T00:00:02Z] [DISCOVERY] Issue #9 labels=[] comments=2 status=has_non_wip_pr(#57)
+[2026-06-22T00:00:02Z] [DISCOVERY] Issue #8 labels=[enhancement] comments=1 status=has_non_wip_pr(#32)
+[2026-06-22T00:00:02Z] [DISCOVERY] Issue #7 labels=[enhancement] comments=2 status=has_non_wip_pr(#53)
+[2026-06-22T00:00:02Z] [DISCOVERY] Issue #6 labels=[enhancement,help_wanted] comments=2 status=has_non_wip_pr(#52)
+[2026-06-22T00:00:03Z] [DISCOVERY COMPLETE] 19 open issues evaluated. 17 have non-WIP PRs. 2 have only WIP PRs: #18 (AudioCraft), #23 (Lavalink). Selected #23 — Lavalink infra partially exists (lavalink/ dir, wavelink in requirements, docker-compose service, voice_manager stub).
+[2026-06-22T00:00:04Z] [PHASE 1/4] Branch created: claude/feat/issue-23-lavalink-integration from claude/feat/issue-25-campaign-module-exporter (sha=373f3c8)
+[2026-06-22T00:00:05Z] [PHASE 2/4] Created docs/issue-23-solution.md
+[2026-06-22T00:00:06Z] [PHASE 3/4] Implementing: discord-bot/lavalink_manager.py (new), discord-bot/voice_manager.py (Lavalink primary paths), docker-compose.yml (shared volume + JVM cap), lavalink/application.yml (review)
+[2026-06-22T00:00:10Z] [PUSH] Files pushed to branch claude/feat/issue-23-lavalink-integration
+[2026-06-22T00:00:11Z] [PULL_REQUEST] PR created — Fixes #23
+[2026-06-22T00:00:12Z] [PHASE 4/4] Merge request comment posted on issue #23
+[2026-06-22T00:00:13Z] [COMPLETE] Issue #23 implementation delivered; awaiting human review and merge
