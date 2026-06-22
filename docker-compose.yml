@@ -1,6 +1,6 @@
 version: '3.9'
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────────
 # Aetheris Scribe Engine — Docker Compose
 # TDR-compliant deployment. Root: /srv/aetheris_v1/
 #
@@ -18,8 +18,8 @@ version: '3.9'
 #   ironclad-chroma ChromaDB (RAG)
 #   ironclad-csv-sync CSV export worker
 #   media-proxy    Static asset server (:8001)
-#   lavalink       Audio engine (:2333)
-# ─────────────────────────────────────────────────────────────────────────────
+#   lavalink-audio Audio engine (:2333)  [Issue #23]
+# ─────────────────────────────────────────────────────────────────────────────────
 
 networks:
   aetheris_net:
@@ -39,7 +39,7 @@ volumes:
 
 services:
 
-  # ── Scribe (Orchestrator — Pipeline Engine) ──────────────────────────────────
+  # ── Scribe (Orchestrator — Pipeline Engine) ─────────────────────────────────
   scribe:
     build:
       context: ./orchestrator
@@ -84,7 +84,7 @@ services:
       retries: 3
       start_period: 20s
 
-  # ── Discord Bot Listener (Scribe front-end) ───────────────────────────────────
+  # ── Discord Bot Listener (Scribe front-end) ─────────────────────────────────
   ironclad-discord:
     build:
       context: ./discord-bot
@@ -96,11 +96,27 @@ services:
     env_file: .env
     environment:
       - ORCHESTRATOR_URL=http://scribe:8000
+      - MEDIA_PROXY_URL=http://media-proxy:8001
+      # Shared assets dir — mapped to media-assets volume (Issue #23)
+      # Lavalink streams audio from MEDIA_PROXY_URL/assets/* via HTTP source
+      - ASSETS_DIR=/app/assets
+      - AUDIO_DIR=/app/assets/audio
+      - TTS_CACHE_DIR=/app/assets/tts
+      - MUSIC_CACHE_DIR=/app/assets/music
+      - SFX_CACHE_DIR=/app/assets/sfx
+      # Use the service name defined in this compose file
+      - LAVALINK_HOST=lavalink-audio
     depends_on:
       scribe:
         condition: service_healthy
+      lavalink-audio:
+        condition: service_healthy
+    volumes:
+      # Shared with media-proxy: TTS/SFX/music files written here are
+      # immediately accessible to Lavalink via the media-proxy HTTP server
+      - media-assets:/app/assets
 
-  # ── Brain (Ollama — Local AI, Intel GPU) ──────────────────────────────────────
+  # ── Brain (Ollama — Local AI, Intel GPU) ──────────────────────────────────
   brain:
     image: ollama/ollama:latest
     container_name: aetheris-brain
@@ -123,7 +139,7 @@ services:
       retries: 5
       start_period: 30s
 
-  # ── Janitor (Alpine — GFS Backup + 30-day Media Prune) ───────────────────────
+  # ── Janitor (Alpine — GFS Backup + 30-day Media Prune) ────────────────────
   # TDR §4: Alpine, GFS Backup Shell, 30-day Pruning Logic
   janitor:
     build:
@@ -166,7 +182,7 @@ services:
       retries: 5
       start_period: 20s
 
-  # ── Redis Session Cache ─────────────────────────────────────────────────────
+  # ── Redis Session Cache ────────────────────────────────────────────────────
   ironclad-cache:
     image: redis:7-alpine
     container_name: aetheris-cache
@@ -182,7 +198,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── CSV Sync Worker ─────────────────────────────────────────────────────────
+  # ── CSV Sync Worker ────────────────────────────────────────────────────────
   ironclad-csv-sync:
     build:
       context: ./csv-sync
@@ -203,7 +219,7 @@ services:
     volumes:
       - csv-exports:/app/exports
 
-  # ── ChromaDB Vector Store (RAG) ─────────────────────────────────────────────
+  # ── ChromaDB Vector Store (RAG) ───────────────────────────────────────────
   ironclad-chroma:
     image: chromadb/chroma:latest
     container_name: aetheris-chroma
@@ -217,7 +233,7 @@ services:
       - IS_PERSISTENT=TRUE
       - ANONYMIZED_TELEMETRY=FALSE
 
-  # ── Media Asset Proxy ───────────────────────────────────────────────────────
+  # ── Media Asset Proxy ─────────────────────────────────────────────────────
   media-proxy:
     build:
       context: ./media-proxy
@@ -231,7 +247,7 @@ services:
     volumes:
       - media-assets:/app/assets
 
-  # ── Pulse (Health Sentinel — Flask Sidecar) ──────────────────────────────────
+  # ── Pulse (Health Sentinel — Flask Sidecar) ──────────────────────────────
   # TDR §5: Headless status reporting via Flask Pulse Web-UI (Port 58291)
   pulse:
     build:
@@ -256,7 +272,11 @@ services:
       timeout: 5s
       retries: 3
 
-  # ── Lavalink Audio Engine ───────────────────────────────────────────────────
+  # ── Lavalink Audio Engine (Issue #23) ─────────────────────────────────────
+  # The Lavalink JVM maintains the Discord UDP audio connection, streams
+  # audio from the media-proxy HTTP source, and handles all mixing. This
+  # offloads audio I/O entirely from the Python event loop.
+  # JVM heap is capped at 256 MB so it does not starve Ollama inference.
   lavalink-audio:
     image: ghcr.io/lavalink-devs/lavalink:4
     container_name: aetheris-lavalink
@@ -266,6 +286,7 @@ services:
     environment:
       - SERVER_PORT=2333
       - LAVALINK_SERVER_PASSWORD=${LAVALINK_PASSWORD:?LAVALINK_PASSWORD required}
+      - _JAVA_OPTIONS=-Xmx256m -Xms64m
     volumes:
       - ./lavalink/application.yml:/opt/Lavalink/application.yml
     healthcheck:

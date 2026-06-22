@@ -1,3 +1,5 @@
+# Lavalink v4 server configuration — Ironclad GM (Issue #23)
+# Memory is managed via _JAVA_OPTIONS in docker-compose.yml (-Xmx256m).
 server:
   port: 2333
   address: 0.0.0.0
@@ -9,12 +11,16 @@ lavalink:
   server:
     password: "${LAVALINK_SERVER_PASSWORD}"
     sources:
+      # HTTP source is the primary path for Ironclad GM: Lavalink streams
+      # TTS, ambient, and Lyria music directly from the media-proxy service
+      # (http://media-proxy:8001/assets/*) without any Python-side download.
+      http: true
       youtube: true
       bandcamp: true
       soundcloud: true
       twitch: true
       vimeo: true
-      http: true
+      # Local filesystem source disabled; audio is served via HTTP instead
       local: false
     filters:
       volume: true
