@@ -109,6 +109,11 @@ class Settings(BaseSettings):
     # GFS backup target (Janitor writes here)
     backups_dir:    str = "/app/backups"
 
+    # ── AudioCraft (generative soundscaping) ─────────────────────────────────
+    audiocraft_url:                  str = "http://aetheris-audiocraft:8080"
+    audiocraft_ambient_ttl_seconds:  int = 3600
+    audiocraft_sfx_ttl_seconds:      int = 300
+
     # ── App ───────────────────────────────────────────────────────────────────
     log_level:          str = "INFO"
     session_secret_key: str = "change-me-to-a-long-random-string"
