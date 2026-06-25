@@ -476,6 +476,15 @@ class MusicCue(BaseModel):
     crossfade_s:    float = Field(default=2.0, ge=0.0, le=10.0)
 
 
+class SoundscapeCue(BaseModel):
+    """AI-generated ambient soundscape cue from AudioCraft/AudioGen."""
+    ambient_url:    str | None = Field(default=None, description="Media-proxy URL for looped ambient track (Track 2)")
+    sfx_url:        str | None = Field(default=None, description="Media-proxy URL for one-shot SFX (Track 3)")
+    ambient_prompt: str        = Field(default="", description="AudioGen prompt used for the ambient loop")
+    sfx_prompt:     str        = Field(default="", description="AudioGen prompt used for the SFX")
+    from_cache:     bool       = Field(default=False, description="True when served from Redis cache")
+
+
 class ChannelDirective(BaseModel):
     """
     Instruction for the Discord bot to manipulate a player's channel access.
@@ -589,6 +598,15 @@ class NarrativeResponsePayload(BaseModel):
         description="UUID of a handout to deliver automatically to the player after this turn.",
     )
 
+    # ── Issue #18: AudioCraft Adaptive Soundscaping ───────────────────────
+    soundscape_cue: SoundscapeCue | None = Field(
+        default=None,
+        description=(
+            "AudioCraft-generated soundscape. ambient_url is looped as Track 2; "
+            "sfx_url plays once as Track 3. None when AudioCraft service is unavailable."
+        ),
+    )
+
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -628,215 +646,93 @@ class GMPlanResult(BaseModel):
         default=False,
         description="True when this is a major scene transition that warrants new scene art.",
     )
-    trigger_npc_portrait: str | None = Field(
+    scene_image_prompt:   str       = Field(
+        default="",
+        description="Stable Diffusion prompt for the scene image (only when trigger_scene_image=True)",
+    )
+    trigger_npc_portrait: bool      = Field(
+        default=False,
+        description="True when a new NPC appears for the first time and needs a portrait generated.",
+    )
+    npc_portrait_name:    str       = Field(
+        default="",
+        description="NPC name for portrait generation (only when trigger_npc_portrait=True)",
+    )
+    music_cue:            MusicCue | None = Field(
         default=None,
-        description="NPC name if this is the player's first encounter with this NPC.",
+        description="Background music directive for this scene beat.",
+    )
+    sfx_cues:             list[SFXCue] = Field(
+        default_factory=list,
+        description="One-shot SFX to fire alongside narrative delivery.",
+    )
+    handout_id:           str | None   = Field(
+        default=None,
+        description="UUID of a handout to deliver to the player post-narration.",
+    )
+    channel_directive:    ChannelDirective | None = Field(
+        default=None,
+        description="Channel access change instruction for the Discord bot.",
+    )
+    thread_event:         ThreadEvent | None = Field(
+        default=None,
+        description="Whether to open, continue, or close a combat thread.",
+    )
+    thread_title:         str = Field(
+        default="Encounter Details",
+        description="Title for the ephemeral encounter thread.",
+    )
+    whisper:              str | None = Field(
+        default=None,
+        description="Private GM insight to DM to the player after narration.",
     )
 
 
 class SubAgentResult(BaseModel):
     """
-    The result returned by a single sub-agent execution.
-    Aggregated by SubAgentDispatcher and handed to the GM for synthesis.
+    Output of a single sub-agent execution.
+    Aggregated by SubAgentDispatcher and synthesised by GMDirector.
     """
-    task:            SubAgentTask
-    raw_output:      str             = Field(..., description="Uncensored raw text from the sub-agent node")
-    node_name:       str             = Field(default="unknown", description="Which Ollama node handled this task")
-    voice_id:        str             = Field(
-        default="en-US-GuyNeural",
-        description="edge-tts voice name for this node — carried into TTSCue for voice channel playback",
-    )
-    ttft_ms:         int | None      = Field(default=None, description="Time-to-first-token in ms for this task")
-    brand_violation: bool            = Field(
+    task_id:         str
+    task_type:       str
+    entity_name:     str
+    content:         str  = Field(..., description="Generated prose or structured data")
+    node_name:       str  = Field(default="unknown", description="Ollama node that ran this task")
+    brand_violation: bool = Field(
         default=False,
-        description="True if a brand violation was detected and stripped (best-effort fallback)",
+        description="True if brand-filter stripping failed after retry",
     )
+    latency_ms:      int  = Field(default=0, description="Wall-clock ms from dispatch to completion")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Top-Level Pipeline Result (persisted to action_log)
+# GM Director Channel Map (runtime setting)
 # ─────────────────────────────────────────────────────────────────────────────
 
-class PipelineResult(BaseModel):
-    """
-    Aggregate of all four pipeline phases. Written to the action_log table
-    for full session replay capability.
-    """
-    intent:      IntentPayload
-    resolution:  OllamaResolutionPayload
-    commit:      StateCommitPayload
-    narrative:   NarrativeResponsePayload
-    pipeline_duration_ms: int = 0
+class ChannelMapEntry(BaseModel):
+    """A single zone→channel_id binding stored in global_settings."""
+    zone_key:   str = Field(..., description="Semantic zone name, e.g. 'tavern', 'dungeon'")
+    channel_id: str = Field(..., description="Discord channel snowflake ID")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Async Session Feature Schemas
+# GM Directive (White Portal backchannel — admin-only)
 # ─────────────────────────────────────────────────────────────────────────────
-
-# ── Chronicle Recap ───────────────────────────────────────────────────────────
-
-class RecapRequest(BaseModel):
-    """
-    Request a 'Previously on…' catch-up summary for a player who was offline.
-    The orchestrator queries everything in action_log and story_context that
-    occurred after the player's last message, then asks Gemini to produce a
-    concise bulleted summary.
-    """
-    player_id:   str = Field(..., description="Discord snowflake of the requesting player")
-    guild_id:    str = Field(..., description="Discord server snowflake")
-    campaign_id: str = Field(..., description="Campaign UUID")
-
-
-class RecapResponse(BaseModel):
-    """Ephemeral 'Previously on…' summary delivered to the requesting player."""
-    player_id:        str
-    campaign_id:      str
-    recap_text:       str   = Field(..., description="Bulleted narrative summary")
-    events_covered:   int   = Field(default=0, description="Number of action_log rows summarised")
-    since_timestamp:  datetime | None = Field(
-        default=None,
-        description="The timestamp of the player's last action (recap covers everything after this)",
-    )
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-# ── Campfire Mode ─────────────────────────────────────────────────────────────
-
-class PresenceUpdate(BaseModel):
-    """Posted by the Discord bot whenever a player's online status changes."""
-    player_id:  str  = Field(..., description="Discord snowflake")
-    guild_id:   str  = Field(..., description="Discord server snowflake")
-    online:     bool = Field(..., description="True = came online, False = went offline")
-
-
-class CampfireStatus(BaseModel):
-    """
-    Current Campfire Mode state for a guild.
-    When active, the pipeline allows only 'downtime RP' actions and refuses
-    to advance the main narrative past the current scene.
-    """
-    guild_id:        str
-    active:          bool        = False
-    absent_players:  list[str]   = Field(
-        default_factory=list,
-        description="Discord snowflakes of offline players who triggered campfire mode",
-    )
-    checked_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-# ── Async Downtime Tasks ──────────────────────────────────────────────────────
-
-class DowntimeSubmitRequest(BaseModel):
-    """
-    Submitted by a player via /downtime before they log off.
-    The GM resolves the task in the background while the player sleeps.
-    """
-    player_id:      str = Field(..., description="Discord snowflake")
-    guild_id:       str = Field(..., description="Discord server snowflake")
-    campaign_id:    str = Field(..., description="Campaign UUID")
-    description:    str = Field(
-        ...,
-        description="What the character does during downtime, in the player's own words",
-        max_length=1000,
-    )
-    duration_hours: int = Field(
-        default=8,
-        ge=1,
-        le=168,
-        description="Real-world hours before the task resolves (default 8 = overnight)",
-    )
-
-
-class DowntimeTaskStatus(BaseModel):
-    """Current state of a single downtime task."""
-    task_id:          str
-    description:      str
-    status:           str   = Field(..., description="pending | resolving | complete | failed")
-    duration_hours:   int
-    submitted_at:     datetime
-    resolves_at:      datetime
-    resolved_at:      datetime | None = None
-    result_narrative: str | None      = None
-    notified:         bool            = False
-
-
-class DowntimePendingNotification(BaseModel):
-    """
-    Returned by /api/downtime/notifications — the Discord bot polls this
-    endpoint, DMs the player, then marks the notification delivered.
-    """
-    task_id:          str
-    player_id:        str
-    result_narrative: str
-    character_name:   str = ""
-
-
-# ── Retcon ────────────────────────────────────────────────────────────────────
-
-class RetconRequest(BaseModel):
-    """
-    Admin request to roll back a specific action and restore pre-action state.
-    The action_log row is flagged retconned=TRUE (never deleted) for audit purposes.
-    """
-    intent_id:    str = Field(..., description="UUID of the action_log entry to retcon")
-    admin_id:     str = Field(..., description="Discord snowflake of the admin issuing the retcon")
-    reason:       str = Field(default="", description="Short explanation for the audit log")
-
-
-class RetconResponse(BaseModel):
-    """Confirmation that a retcon was applied successfully."""
-    intent_id:       str
-    character_id:    str
-    restored_stats:  dict[str, Any]
-    retconned_at:    datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Admin Backchannel Schemas
-# ─────────────────────────────────────────────────────────────────────────────
-
-class DirectiveType(str, Enum):
-    SCENE_DIRECTIVE = "scene_directive"   # trigger env event next scene
-    NPC_HINT        = "npc_hint"          # have NPC drop a specific hint
-    WORLD_EVENT     = "world_event"       # something happens in the world right now
-    PACING_NOTE     = "pacing_note"       # "make this moment feel climactic"
-    CORRECTION      = "correction"        # subtle fix without railroading
-
 
 class GMDirectiveRequest(BaseModel):
     """
-    An OOC (Out-of-Character) admin command sent through the White Portal
-    Backchannel to the GM Engine.  The GM weaves it into the next player
-    action's narrative as a high-priority world-management event.
-
-    This is the ONLY channel through which an admin can influence the story
-    mechanically.  Admin accounts in Discord are treated as standard players
-    (Fair Play Sandbox).
+    Admin-only backchannel directive sent via POST /api/directives.
+    The GM Director merges this into its next narrative plan.
     """
-    campaign_id:     str           = Field(..., description="Campaign UUID")
-    admin_id:        str           = Field(..., description="Admin Discord snowflake")
-    directive_type:  DirectiveType = Field(default=DirectiveType.SCENE_DIRECTIVE)
-    directive_text:  str           = Field(
-        ...,
-        description="Plain-English instruction to the GM Engine",
-        max_length=800,
-    )
-    priority:        int           = Field(
-        default=5,
-        ge=1,
-        le=10,
-        description="Injection urgency: 10 = inject unconditionally, 1 = only if scene context fits",
-    )
+    directive_id:   str      = Field(default_factory=lambda: str(uuid.uuid4()))
+    campaign_id:    str
+    admin_id:       str      = Field(..., description="Admin UUID (validated by AuthService)")
+    directive_text: str      = Field(..., description="Free-text instruction for the GM Director")
+    priority:       int      = Field(default=5, ge=1, le=10)
+    issued_at:      datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class GMDirective(BaseModel):
-    """A single GM directive record, as stored in the database."""
-    directive_id:    str
-    campaign_id:     str
-    admin_id:        str
-    directive_type:  DirectiveType
-    directive_text:  str
-    priority:        int
-    status:          str  = "pending"    # pending | consumed | cancelled
-    submitted_at:    datetime
-    consumed_at:     datetime | None = None
+class GMDirectiveResponse(BaseModel):
+    directive_id: str
+    acknowledged: bool = True
+    queued_at:    datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

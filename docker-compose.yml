@@ -19,6 +19,7 @@ version: '3.9'
 #   ironclad-csv-sync CSV export worker
 #   media-proxy    Static asset server (:8001)
 #   lavalink       Audio engine (:2333)
+#   audiocraft     AudioGen soundscape microservice (:8080)
 # ─────────────────────────────────────────────────────────────────────────────
 
 networks:
@@ -274,3 +275,30 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # ── AudioCraft (AudioGen Soundscape Microservice) ───────────────────────────
+  # Issue #18: Adaptive Environmental Soundscaping
+  # Generates ambient loops (Track 2) and one-shot SFX (Track 3) via Meta AudioGen.
+  # Shares the media-assets volume with media-proxy so generated .wav files are
+  # immediately servable at http://media-proxy:8001/assets/audio/<filename>.
+  audiocraft:
+    build:
+      context: ./audiocraft
+      dockerfile: Dockerfile
+    container_name: aetheris-audiocraft
+    restart: unless-stopped
+    networks:
+      - aetheris_net
+    environment:
+      - AUDIOCRAFT_MODEL=${AUDIOCRAFT_MODEL:-facebook/audiogen-medium}
+      - MAX_DURATION=30
+      - DEVICE=cpu
+      - ASSETS_DIR=/app/assets/audio
+    volumes:
+      - media-assets:/app/assets
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 120s
