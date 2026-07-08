@@ -19,6 +19,7 @@ version: '3.9'
 #   ironclad-csv-sync CSV export worker
 #   media-proxy    Static asset server (:8001)
 #   lavalink       Audio engine (:2333)
+#   ironclad-nats  NATS JetStream message bus (:4222)
 # ─────────────────────────────────────────────────────────────────────────────
 
 networks:
@@ -62,6 +63,7 @@ services:
       - WORLD_DATA_DIR=/app/data
       - LOGS_DIR=/app/logs
       - BACKUPS_DIR=/app/backups
+      - NATS_URL=nats://ironclad-nats:4222
     depends_on:
       ironclad-db:
         condition: service_healthy
@@ -70,6 +72,8 @@ services:
       brain:
         condition: service_started
       ironclad-chroma:
+        condition: service_started
+      ironclad-nats:
         condition: service_started
     volumes:
       - ./data:/app/data          # shared global data (TDR §2)
@@ -274,3 +278,21 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # ── NATS JetStream (Multi-Agent Vector-Space Message Bus) ───────────────────
+  ironclad-nats:
+    image: nats:2-alpine
+    container_name: aetheris-nats
+    restart: unless-stopped
+    networks:
+      - aetheris_net
+    command: ["--js", "--http_port", "8222"]
+    ports:
+      - "4222:4222"   # NATS client connections
+      - "8222:8222"   # NATS monitoring / healthz
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8222/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
