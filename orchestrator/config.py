@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     redis_password: str
     session_ttl_seconds: int = 3600
 
+    # ── NATS JetStream (optional — multi-agent vector-space communication) ────
+    # Leave empty to disable; NatsBus degrades gracefully when NATS is absent.
+    nats_url: str = ""
+
     # ── Ollama ────────────────────────────────────────────────────────────────
     ollama_host:  str = "http://ironclad-ollama:11434"
     ollama_model: str = "mistral:7b-instruct"
