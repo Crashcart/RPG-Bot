@@ -9,12 +9,14 @@ Ollama mechanical engine.
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from orchestrator.schemas.payloads import (
     CharacterSnapshot,
     ContextAssemblyPayload,
     IntentPayload,
+    RuleChunk,
 )
 from orchestrator.services.database import DatabaseService
 from orchestrator.services.rag_service import RAGService
@@ -23,6 +25,44 @@ if TYPE_CHECKING:
     from orchestrator.services.rolling_vault import RollingVault
 
 logger = logging.getLogger(__name__)
+
+# Common English title-cased tokens to exclude from the PDF name allow-list.
+_PDF_COMMON_WORDS: frozenset[str] = frozenset({
+    "the", "this", "that", "with", "from", "into", "upon", "when", "roll",
+    "each", "your", "they", "them", "their", "have", "been", "will", "would",
+    "should", "could", "must", "may", "can", "you", "he", "she", "it", "we",
+    "also", "if", "or", "and", "but", "not", "any", "all", "for", "as",
+    "at", "on", "in", "is", "an", "a", "of", "to", "by", "do", "so", "no",
+    "be", "are", "was", "were", "has", "had", "its", "one", "two", "three",
+    "then", "than", "thus", "very", "just", "only", "even", "such",
+    "there", "these", "those", "some", "many", "most", "more", "less",
+    "use", "used", "make", "made", "take", "give", "gets", "get",
+    "new", "old", "high", "low", "long", "short", "first", "last", "next",
+    "while", "after", "before", "since", "until", "unless", "other",
+    "same", "both", "either", "neither", "every",
+    "play", "game", "turn", "round", "level", "skill", "stat", "check",
+    "action", "result", "move", "attack", "damage", "hit", "miss",
+    "success", "failure", "critical", "effect", "ability", "power",
+    "player", "character", "monster", "creature", "enemy", "ally",
+    "combat", "scene", "story", "world", "narrator", "director",
+    "weapon", "armor", "item", "list", "table", "example", "note",
+})
+
+
+def _extract_pdf_names(rule_chunks: list[RuleChunk]) -> list[str]:
+    """
+    Extract lowercase proper-noun candidates from rulebook PDF chunks.
+    Finds Title-cased tokens (3+ chars, not all-caps) and removes common
+    English words.  The result is the per-turn brand-filter allow-list.
+    """
+    found: set[str] = set()
+    for chunk in rule_chunks:
+        for tok in re.findall(r"\b([A-Z][a-zA-Z]{2,})\b", chunk.content):
+            lower = tok.lower()
+            if not tok.isupper() and lower not in _PDF_COMMON_WORDS:
+                found.add(lower)
+    return sorted(found)
+
 
 # Keywords that suggest a vehicle/asset is involved in the action.
 # When ANY of these appear in the player's raw input, vehicle context is
@@ -122,4 +162,5 @@ class IngestionPhase:
             rule_chunks=rule_chunks,
             raw_input=intent.raw_input,
             rolling_context=rolling_context,
+            pdf_name_allowlist=_extract_pdf_names(rule_chunks),
         )

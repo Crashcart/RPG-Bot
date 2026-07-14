@@ -425,6 +425,7 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
             campaign_system=campaign_system,
             campaign_id=campaign_id,
             active_directives=active_directives or None,
+            pdf_name_allowlist=context.pdf_name_allowlist,
         )
 
         if backchannel and active_directives:
