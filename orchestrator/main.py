@@ -108,62 +108,60 @@ pdf_processor = PDFProcessorService(
     chroma_port=settings.chroma_port,
 )
 
-# ── Multimedia Services ────────────────────────────────────────────────────────
+# ── Multimedia Services ──────────────────────────────────────────────────────────────────────────
 image_gen   = ImageGenService(settings, db)
 elevenlabs  = ElevenLabsClient(settings)
 handout_svc = HandoutService(db, gemini)
 faction_svc = FactionService(db, gemini)
 
-# ── Tier 2: Sub-Agent Dispatcher ─────────────────────────────────────────────
-# Routes delegation tasks from the GM Director to actor/scribe Ollama nodes.
+# ── Tier 2: Sub-Agent Dispatcher ───────────────────────────────────────────────────────────────────
 sub_agent_dispatcher = SubAgentDispatcher(node_router)
 
-# ── Telemetry Service (no pool dependency — initialised immediately) ──────────
-# Must be created before GMDirector so it can be injected.
+# ── Telemetry Service (no pool dependency — initialised immediately) ───────────────────────
 telemetry_svc = TelemetryService()
 
-# ── Web Search Service ────────────────────────────────────────────────────────
+# ── Web Search Service ──────────────────────────────────────────────────────────────────────────────
 web_search = WebSearchService(settings)
 
-# ── Disk Agent Service ────────────────────────────────────────────────────────
+# ── Disk Agent Service ──────────────────────────────────────────────────────────────────────────────
 disk_agent = DiskAgentService(settings.world_data_dir)
 
-# ── Reality Wall (SQLite world-state + path isolation) ────────────────────────
-# TDR §2: vault DB at /app/data/vault/scribe_core.db
+# ── Reality Wall (SQLite world-state + path isolation) ──────────────────────────────────────
 reality_wall = RealityWall(data_dir=settings.world_data_dir, vault_dir=settings.vault_dir)
 
-# ── Paradox Engine (unreliable narrator post-processor) ───────────────────────
+# ── Paradox Engine (unreliable narrator post-processor) ────────────────────────────────────────
 paradox_engine = ParadoxEngine()
 
-# ── Prophetic Buffer (predictive asset pre-generation) ────────────────────────
+# ── Prophetic Buffer (predictive asset pre-generation) ────────────────────────────────────────
 _cloud_storyteller = claude if (settings.cloud_provider == "claude" and claude) else gemini
-prophetic_buffer = PropheticBuffer(cache=cache, storyteller=_cloud_storyteller)
+prophetic_buffer = PropheticBuffer(
+    cache=cache,
+    storyteller=_cloud_storyteller,
+    node_router=node_router,
+    elevenlabs=elevenlabs,
+    image_gen=image_gen,
+)
 
-# ── Janitor (GFS backup + media auto-prune) ───────────────────────────────────
-# Python JanitorService acts as secondary janitor; primary is the Alpine container
+# ── Janitor (GFS backup + media auto-prune) ─────────────────────────────────────────────────────
 janitor = JanitorService(
     data_dir   = settings.world_data_dir,
     backup_dir = settings.backups_dir,
     logs_dir   = settings.logs_dir,
 )
 
-# ── World Registry (dynamic genre discovery + schema cache) ───────────────────
+# ── World Registry (dynamic genre discovery + schema cache) ──────────────────────────────────
 world_registry = WorldRegistry(data_dir=settings.world_data_dir, reality_wall=reality_wall)
 
-# ── System Integrity Check (SIC) ──────────────────────────────────────────────
-# TDR §1: four-pillar verifier — runs on startup, on-demand, and post-backup.
+# ── System Integrity Check (SIC) ───────────────────────────────────────────────────────────────────
 sic = SystemIntegrityCheck(
     data_dir    = settings.world_data_dir,
     backups_dir = settings.backups_dir,
     ollama_host = settings.ollama_host,
     cache       = cache,
 )
-# Give janitor a reference so it runs SIC after each backup cycle.
 janitor._sic = sic
 
-# ── Tier 1: GM Director (Central Storyteller) ─────────────────────────────────
-# Selects the storyteller per-turn (Gemini or auto-promoted Ollama), runs the
-# planning pass, dispatches sub-agents, synthesizes, and applies immersion filters.
+# ── Tier 1: GM Director (Central Storyteller) ─────────────────────────────────────────────────────
 gm_director = GMDirector(
     gemini=gemini,
     node_router=node_router,
@@ -182,19 +180,16 @@ gm_director = GMDirector(
     db=db,
 )
 
-# ── Rolling Vault (sliding context window, anti-overflow) ─────────────────────
-# Step 5: pool is bound in lifespan after db.connect(); vault is injected into
-# IngestionPhase so every assemble() call gets bounded session history.
+# ── Rolling Vault (sliding context window, anti-overflow) ───────────────────────────────────────
 rolling_vault = RollingVault(node_router=node_router)
 
 # Pipeline phase singletons
 ingestion    = IngestionPhase(db, rag, rolling_vault=rolling_vault)
 adjudication = AdjudicationPhase(node_router)
 state_commit = StateCommitPhase(db, cache)
-narration    = NarrationPhase(gm_director)   # Phase 4 fully delegated to GMDirector
+narration    = NarrationPhase(gm_director)
 
-# ── Async Session Services (lazy-initialised in lifespan after pool is ready) ─
-# These are bound to db.pool after connect(); placeholders set to None here.
+# ── Async Session Services (lazy-initialised in lifespan after pool is ready) ─────────────────
 chronicle:   ChronicleService        | None = None
 campfire:    CampfireService         | None = None
 downtime:    DowntimeService         | None = None
@@ -225,26 +220,21 @@ async def lifespan(app: FastAPI):
     await cache.connect()
     await rag.connect()
     await story_memory.connect(db.pool)
-    await node_router.start()   # begin background health-check loop
-    await reality_wall.init()        # create SQLite schema + data dirs
-    await world_registry.scan()      # discover all worlds in data/fonts/+templates/
-    rolling_vault.bind(db.pool)      # Step 5: bind pool now that db.connect() is done
+    await node_router.start()
+    await reality_wall.init()
+    await world_registry.scan()
+    rolling_vault.bind(db.pool)
     await prophetic_buffer.start()
     await janitor.start()
 
-    # ── System Integrity Check (TDR §1) ──────────────────────────────────────
-    # Inject cache reference now that cache is connected.
     sic._cache = cache
     sic_result = await sic.run()
     if sic_result.status == "critical":
         failed = [p for p in sic_result.pillars if not p.passed and p.critical]
         msgs   = "; ".join(p.message for p in failed)
-        logger.critical(
-            "SIC CRITICAL — bot connection aborted. Failures: %s", msgs
-        )
+        logger.critical("SIC CRITICAL — bot connection aborted. Failures: %s", msgs)
         raise RuntimeError(f"System Integrity Check failed: {msgs}")
 
-    # Initialise async-session services now that db.pool is live
     global chronicle, campfire, downtime, retcon, backchannel, auth, sandbox
     chronicle   = ChronicleService(settings, db.pool)
     campfire    = CampfireService(settings, db.pool)
@@ -259,7 +249,6 @@ async def lifespan(app: FastAPI):
         web_search=web_search,
     )
 
-    # Expose services to web router and middleware
     app.state.backchannel    = backchannel
     app.state.telemetry      = telemetry_svc
     app.state.auth           = auth
@@ -268,7 +257,6 @@ async def lifespan(app: FastAPI):
     app.state.gemini         = gemini
     app.state.world_registry = world_registry
 
-    # Start downtime background resolver
     resolver_task = asyncio.create_task(_downtime_resolver_loop())
 
     yield
@@ -296,43 +284,29 @@ _OPEN_WEB_PATHS = {"/web/login", "/web/setup"}
 class AuthGuardMiddleware(BaseHTTPMiddleware):
     """
     Protect all /web/ routes behind session-based admin authentication.
-
-    Middleware stack ordering (added first = innermost = executes last):
-      AuthGuard → SessionMiddleware → CORSMiddleware → handler
-    So by the time AuthGuard.dispatch() runs, request.session is already
-    populated by SessionMiddleware.
-
-    First-Boot: if admin_accounts is empty → force redirect to /web/setup.
-    Normal: if session missing admin_id → redirect to /web/login.
-    The open paths (/web/login, /web/setup) bypass auth entirely.
     """
 
     def __init__(self, app) -> None:
         super().__init__(app)
-        # Once we confirm setup is complete, skip is_first_boot() DB calls.
         self._setup_done = False
 
     async def dispatch(self, request: StarletteRequest, call_next):
         path = request.url.path
 
-        # Only guard /web/ routes
         if not path.startswith("/web/"):
             return await call_next(request)
 
-        # Auth and setup pages are always open
         if path in _OPEN_WEB_PATHS:
             return await call_next(request)
 
         auth_svc = getattr(request.app.state, "auth", None)
 
-        # First-boot check (cached after first successful login)
         if not self._setup_done and auth_svc:
             first_boot = await auth_svc.is_first_boot()
             if first_boot:
                 return RedirectResponse("/web/setup", status_code=302)
             self._setup_done = True
 
-        # Session auth check
         if not request.session.get("admin_id"):
             next_path = path
             return RedirectResponse(f"/web/login?next={next_path}", status_code=302)
@@ -347,13 +321,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Middleware stack (add_middleware builds LIFO — first added = innermost = executes last).
-# Desired request order: SessionMiddleware → CORSMiddleware → AuthGuard → handler
-# So add AuthGuard first (innermost), then CORS, then Session (outermost).
 app.add_middleware(AuthGuardMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten in production
+    allow_origins=["*"],
     allow_methods=["POST", "GET", "PATCH", "DELETE"],
     allow_headers=["*"],
 )
@@ -363,7 +334,6 @@ app.add_middleware(
     max_age=3600,
 )
 
-# ── Web UI setup ──────────────────────────────────────────────────────────────
 _templates_dir = Path(__file__).parent / "templates"
 app.state.templates    = Jinja2Templates(directory=str(_templates_dir))
 app.state.db           = db
@@ -385,13 +355,8 @@ app.include_router(web_router,  prefix="/web")
     summary="Process a player action through the full pipeline",
 )
 async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
-    """
-    Entry point for Discord listener. Runs the four-phase pipeline and
-    returns the final narrative response for display in the channel.
-    """
     pipeline_start = time.monotonic()
 
-    # ── Idempotency Guard ─────────────────────────────────────────────────────
     if not await cache.set_pipeline_lock(intent.intent_id):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -399,7 +364,6 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
         )
 
     try:
-        # ── Resolve active campaign ───────────────────────────────────────────
         campaign = await db.get_active_campaign(intent.guild_id)
         if not campaign:
             raise HTTPException(
@@ -407,10 +371,6 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
                 detail=f"No active campaign found for guild {intent.guild_id}.",
             )
 
-        # ── Campfire Mode Guard ────────────────────────────────────────────────
-        # When key players are offline, deflect critical plot advances and
-        # suggest downtime RP instead.  Soft-block: we still generate a
-        # narrative, but the GM signals that the story clock is paused.
         if campfire and await campfire.is_campfire_active(intent.guild_id):
             cf_status = await campfire.get_status(intent.guild_id)
             absent_list = ", ".join(f"<@{p}>" for p in cf_status.absent_players[:3])
@@ -438,11 +398,8 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
         campaign_id = campaign["id"]
         campaign_system = campaign["system"]
 
-        # ── Phase 1: Ingestion & Context Assembly ─────────────────────────────
-        context = await ingestion.assemble(intent, campaign_id)
+        context    = await ingestion.assemble(intent, campaign_id)
 
-        # ── Phase 2: Mechanical Adjudication ──────────────────────────────────
-        # Signal Health Sentinel: heavy AI task in flight
         _sentinel_key = "ironclad:sentinel:busy"
         try:
             await cache._redis.set(_sentinel_key, "adjudication", ex=60)
@@ -454,15 +411,12 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
         except Exception:
             pass
 
-        # ── Phase 3: State Commitment ─────────────────────────────────────────
         commit = await state_commit.commit(resolution)
 
-        # ── Fetch pending admin backchannel directives ────────────────────────
         active_directives: list[GMDirective] = []
         if backchannel:
             active_directives = await backchannel.get_pending_directives(campaign_id)
 
-        # ── Phase 4: Narrative Generation (with story memory) ─────────────────
         narrative = await narration.narrate(
             resolution=resolution,
             commit=commit,
@@ -473,7 +427,6 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
             active_directives=active_directives or None,
         )
 
-        # ── Consume injected directives ───────────────────────────────────────
         if backchannel and active_directives:
             await backchannel.consume_directives(
                 directive_ids=[d.directive_id for d in active_directives],
@@ -486,7 +439,6 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
                 intent_id=intent.intent_id,
             )
 
-        # ── Persist audit log ─────────────────────────────────────────────────
         duration_ms = int((time.monotonic() - pipeline_start) * 1000)
         await db.log_action({
             "intent_id":          intent.intent_id,
@@ -515,9 +467,9 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
             campaign_id=campaign_id,
         )
 
-        # ── Rolling Vault: append turn + compress if window full (Step 5) ───────
         try:
-            asyncio.create_task(
+            import asyncio as _asyncio
+            _asyncio.create_task(
                 rolling_vault.append(
                     campaign_id  = campaign_id,
                     player_input = intent.raw_input,
@@ -528,7 +480,6 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
         except Exception as _rv_exc:
             logger.debug("RollingVault.append task creation failed (non-fatal): %s", _rv_exc)
 
-        # ── Prophetic Buffer: fire-and-forget prefetch for next turn ──────────
         try:
             _pipeline_result = PipelineResult(
                 intent=intent,
@@ -541,8 +492,6 @@ async def process_action(intent: IntentPayload) -> NarrativeResponsePayload:
         except Exception as _pb_exc:
             logger.debug("PropheticBuffer enqueue failed (non-fatal): %s", _pb_exc)
 
-        # ── Ghost Continuity: cache for offline Discord bot delivery ──────────
-        # Key expires in 1 hour; bot marks delivered via /api/narrative/delivered
         try:
             ghost_key = f"ghost:{intent.guild_id}:{intent.intent_id}"
             ghost_data = json.dumps({
@@ -597,12 +546,12 @@ async def create_session(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Rulebook API  (called by the Discord bot — JSON only, no sessions/redirects)
+# Rulebook API
 # ─────────────────────────────────────────────────────────────────────────────
 
 _pdf_upload_dir = Path(os.environ.get("PDF_UPLOAD_DIR", "/app/pdf_uploads"))
 _pdf_upload_dir.mkdir(parents=True, exist_ok=True)
-_MAX_PDF_BYTES = 200 * 1024 * 1024  # 200 MB
+_MAX_PDF_BYTES = 200 * 1024 * 1024
 
 
 @app.post("/api/rulebook/ingest", summary="Ingest a PDF rulebook (bot API)")
@@ -612,11 +561,6 @@ async def api_ingest_rulebook(
     module_name: str        = Form(...),
     pdf_file:    UploadFile = File(...),
 ) -> dict:
-    """
-    Accepts a multipart PDF upload from the Discord bot (or any HTTP client).
-    Saves the file, starts a background ingestion job, and returns the job ID
-    immediately so the caller can poll /api/rulebook/status/{job_id}.
-    """
     if not pdf_file.filename or not pdf_file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
 
@@ -738,7 +682,7 @@ async def api_submit_downtime(req: DowntimeSubmitRequest) -> DowntimeTaskStatus:
 
 @app.get(
     "/api/downtime/notifications/{player_id}",
-    summary="Poll for completed downtime task notifications (Discord bot polls this)",
+    summary="Poll for completed downtime task notifications",
 )
 async def api_downtime_notifications(player_id: str) -> list[dict]:
     if not downtime:
@@ -781,7 +725,7 @@ async def api_retcon(req: RetconRequest) -> RetconResponse:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Admin Backchannel API  (White Portal private interface)
+# Admin Backchannel API
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.post(
@@ -791,14 +735,6 @@ async def api_retcon(req: RetconRequest) -> RetconResponse:
     status_code=201,
 )
 async def api_submit_directive(req: GMDirectiveRequest) -> GMDirective:
-    """
-    Submit a private admin instruction through the White Portal backchannel.
-    The directive will be injected into the next player action's narrative
-    for the specified campaign and then archived.
-
-    Admin Discord accounts in the game channels are NOT elevated — this
-    endpoint is the ONLY way to influence the story as a World Architect.
-    """
     if not backchannel:
         raise HTTPException(status_code=503, detail="Backchannel service not initialised.")
     try:
@@ -810,7 +746,7 @@ async def api_submit_directive(req: GMDirectiveRequest) -> GMDirective:
 
 @app.get(
     "/api/backchannel/directives/{campaign_id}",
-    summary="List recent directives for a campaign (White Portal history view)",
+    summary="List recent directives for a campaign",
 )
 async def api_list_directives(campaign_id: str, limit: int = 30) -> list[dict]:
     if not backchannel:
@@ -831,16 +767,11 @@ async def api_cancel_directive(directive_id: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GM Sandbox Chat API  (White Portal private testing interface)
+# GM Sandbox Chat API
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.post("/api/sandbox/chat", summary="Direct GM Engine / NPC chat (sandbox — no state changes)")
 async def api_sandbox_chat(req: dict) -> dict:
-    """
-    Send a message directly to the GM Engine or a specific NPC persona.
-    Supports optional web search grounding and image URL injection.
-    No player state is modified.
-    """
     if not sandbox:
         raise HTTPException(status_code=503, detail="Sandbox service not initialised.")
     try:
@@ -858,16 +789,11 @@ async def api_sandbox_chat(req: dict) -> dict:
 
 @app.post("/api/sandbox/upload-image", summary="Upload an image for sandbox visual analysis")
 async def api_sandbox_upload_image(file: UploadFile = File(...)) -> dict:
-    """
-    Accept an image upload, save it to the PDF upload directory (reusing the
-    same storage), and return a temporary URL the sandbox can pass to
-    generate_with_image().
-    """
     import uuid as _uuid
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Only image files are accepted.")
     contents = await file.read()
-    if len(contents) > 20 * 1024 * 1024:  # 20 MB cap
+    if len(contents) > 20 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="Image exceeds 20 MB limit.")
     ext = file.filename.rsplit(".", 1)[-1].lower() if file.filename and "." in file.filename else "jpg"
     img_id   = str(_uuid.uuid4())
@@ -878,7 +804,6 @@ async def api_sandbox_upload_image(file: UploadFile = File(...)) -> dict:
 
 @app.get("/api/sandbox/image/{filename}", summary="Serve an uploaded sandbox image")
 async def api_sandbox_image(filename: str):
-    """Serve a previously uploaded sandbox image for Gemini Vision analysis."""
     from fastapi.responses import FileResponse
     img_path = _pdf_upload_dir / filename
     if not img_path.exists() or ".." in filename:
@@ -887,22 +812,21 @@ async def api_sandbox_image(filename: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Web Intel API  (standalone search endpoint)
+# Web Intel API
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/api/search", summary="Run a web search for GM fact-grounding")
 async def api_web_search(q: str, max_results: int = 5) -> list[dict]:
-    """Run a web search via WebSearchService and return structured results."""
     if not q.strip():
         return []
     return await web_search.search(q.strip(), max_results=min(max_results, 10))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Disk Agency API  (AI world artifact file system)
+# Disk Agency API
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.post("/api/disk/{campaign_id}/write", summary="Write a world artifact file (AI sandbox)")
+@app.post("/api/disk/{campaign_id}/write", summary="Write a world artifact file")
 async def api_disk_write(campaign_id: str, req: dict) -> dict:
     path    = req.get("path", "")
     content = req.get("content", "")
@@ -943,15 +867,11 @@ async def api_disk_delete(campaign_id: str, path: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Visual Intel API  (image analysis via Gemini Vision)
+# Visual Intel API
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.post("/api/vision/analyse", summary="Analyse an image URL using Gemini Vision")
 async def api_vision_analyse(req: dict) -> dict:
-    """
-    Analyse an image and return a rich textual description.
-    Used by the Discord bot when a player attaches an image to /act.
-    """
     image_url = req.get("image_url", "")
     context   = req.get("context", "Describe this image for a tabletop RPG Game Master.")
     if not image_url:
@@ -975,12 +895,11 @@ async def api_vision_analyse(req: dict) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# System Settings Value Endpoint (used by bot / voice_manager for runtime config)
+# System Settings Value Endpoint
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/api/settings/value", summary="Get a single system_setting value by key")
 async def api_settings_value(key: str) -> dict:
-    """Used by the Discord bot to read runtime settings (e.g. tts_provider, voice_idle_timeout_s)."""
     value = await db.get_system_setting(key, default=None)
     return {"key": key, "value": value}
 
@@ -991,10 +910,6 @@ async def api_settings_value(key: str) -> dict:
 
 @app.post("/api/sfx/generate", summary="Generate a one-shot SFX clip via ElevenLabs")
 async def api_sfx_generate(req: dict) -> dict:
-    """
-    Generate a short sound effect from a text description.
-    Returns media-proxy URL or raises 503 if ElevenLabs is not configured.
-    """
     description = req.get("description", "").strip()
     if not description:
         raise HTTPException(status_code=400, detail="description required")
@@ -1009,10 +924,6 @@ async def api_sfx_generate(req: dict) -> dict:
 
 @app.post("/api/maps/generate", summary="Generate a scene image or NPC portrait")
 async def api_maps_generate(req: dict) -> dict:
-    """
-    Generate an image from a text prompt using the configured backend
-    (ComfyUI / Stability AI / DALL-E 3).  Saves to media-assets and returns URL.
-    """
     prompt      = req.get("prompt", "").strip()
     campaign_id = req.get("campaign_id", "")
     intent_id   = req.get("intent_id")
@@ -1028,7 +939,6 @@ async def api_maps_generate(req: dict) -> dict:
             detail="Image generation unavailable — backend may be set to 'disabled'."
         )
 
-    # Persist to DB
     if portrait_npc:
         await db.execute(
             """INSERT INTO npc_portraits (npc_name, campaign_id, image_url)
@@ -1100,7 +1010,7 @@ async def api_faction_standings(campaign_id: str, player_id: str) -> list[dict]:
     return await faction_svc.get_standings(player_id, campaign_id)
 
 
-@app.post("/api/music/feedback", summary="Submit music feedback (approve/disapprove)")
+@app.post("/api/music/feedback", summary="Submit music feedback")
 async def api_music_feedback(req: dict) -> dict:
     campaign_id    = req.get("campaign_id", "")
     original_prompt = req.get("original_prompt", "")
@@ -1147,7 +1057,6 @@ async def api_music_regenerate(req: dict) -> dict:
     if not original_prompt:
         raise HTTPException(status_code=400, detail="original_prompt required")
 
-    # Log the negative feedback
     await db.execute(
         """INSERT INTO music_feedback (campaign_id, original_prompt, audio_url, approved,
                                        feedback_note, player_id)
@@ -1168,7 +1077,7 @@ async def api_music_regenerate(req: dict) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Ghost Continuity API  (Discord bot reconnect narrative delivery)
+# Ghost Continuity API
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get(
@@ -1176,14 +1085,9 @@ async def api_music_regenerate(req: dict) -> dict:
     summary="Ghost Continuity: get any undelivered narratives for a guild",
 )
 async def api_pending_narratives(guild_id: str) -> list[dict]:
-    """
-    Called by the Discord bot on_ready to retrieve narratives that were
-    generated while the bot was offline.  Returns up to 10 undelivered items.
-    """
     import json as _json
     items = []
     try:
-        # Scan Redis for keys matching the ghost continuity pattern
         pattern = f"ghost:{guild_id}:*"
         keys = await cache._redis.keys(pattern)
         for key in keys[:10]:
@@ -1204,7 +1108,6 @@ async def api_pending_narratives(guild_id: str) -> list[dict]:
     status_code=200,
 )
 async def api_mark_narrative_delivered(intent_id: str, guild_id: str) -> dict:
-    """Mark a ghost-continuity narrative as delivered so it is not re-sent."""
     try:
         key = f"ghost:{guild_id}:{intent_id}"
         await cache._redis.delete(key)
@@ -1219,14 +1122,8 @@ async def api_mark_narrative_delivered(intent_id: str, guild_id: str) -> dict:
 
 @app.websocket("/ws/telemetry")
 async def telemetry_websocket(websocket: WebSocket):
-    """
-    Real-time pipeline event stream for the White Portal telemetry terminal.
-    Requires an authenticated admin session (session cookie must be present).
-    Replays the last 200 events on connect, then streams live.
-    """
     import asyncio
 
-    # Auth check — session cookie must carry admin_id
     session = websocket.session if hasattr(websocket, "session") else {}
     if not session.get("admin_id"):
         await websocket.close(code=1008, reason="Unauthorized — admin session required")
@@ -1257,36 +1154,17 @@ async def health() -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# System Integrity Check (SIC) — TDR §1
+# System Integrity Check (SIC)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.post(
-    "/api/sic/run",
-    summary="Manually trigger a full System Integrity Check",
-    tags=["sic"],
-)
+@app.post("/api/sic/run", summary="Manually trigger a full System Integrity Check", tags=["sic"])
 async def run_sic() -> dict:
-    """
-    Execute all four SIC pillars immediately.
-
-    Execution triggers: startup (automatic), Director command (this endpoint),
-    and Janitor post-backup (internal).  Results are cached in Redis and
-    surfaced on the Pulse dashboard.
-    """
     result = await sic.run()
     return result.to_dict()
 
 
-@app.get(
-    "/api/sic/status",
-    summary="Return the last cached SIC result from Redis",
-    tags=["sic"],
-)
+@app.get("/api/sic/status", summary="Return the last cached SIC result from Redis", tags=["sic"])
 async def get_sic_status() -> dict:
-    """
-    Returns the most recent SIC result without re-running the checks.
-    If no result is cached yet, triggers a fresh run.
-    """
     try:
         raw = await cache.get("ironclad:sic:result")
         if raw:
@@ -1294,13 +1172,12 @@ async def get_sic_status() -> dict:
             return _json.loads(raw)
     except Exception:
         pass
-    # No cached result — run now
     result = await sic.run()
     return result.to_dict()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Settings API (consumed by the Discord bot)
+# Settings API
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get(
@@ -1309,14 +1186,6 @@ async def get_sic_status() -> dict:
     tags=["settings"],
 )
 async def api_settings_channels() -> dict:
-    """
-    Returns the channel_map system setting as a plain JSON object.
-    Keys are admin-defined zone labels (e.g. "med_bay", "brig");
-    values are Discord channel ID strings.
-
-    Called by the Discord bot every ~60 s to refresh its channel lookup
-    table without requiring an env-var edit or container restart.
-    """
     return await db.get_system_setting("channel_map", default={})
 
 
@@ -1330,10 +1199,6 @@ async def api_settings_channels() -> dict:
     response_model=list[WorldSchema],
 )
 async def list_worlds() -> list[WorldSchema]:
-    """
-    Return every world currently in the WorldRegistry cache.
-    Each world corresponds to a subdirectory of data/fonts/.
-    """
     return world_registry.list_worlds()
 
 
@@ -1343,15 +1208,6 @@ async def list_worlds() -> list[WorldSchema]:
     response_model=WorldSwitchResponse,
 )
 async def switch_world(req: WorldSwitchRequest) -> WorldSwitchResponse:
-    """
-    Bind a campaign to a world.
-
-    - If the world folder exists in data/fonts/ it is activated immediately.
-    - If it does not exist, the folder + minimal world.json are created
-      on the fly (`manifested: true`) — no code changes required.
-
-    Called by the Discord `/switch_world` slash command.
-    """
     try:
         schema, manifested = await world_registry.switch_campaign_world(
             campaign_id=req.campaign_id,
@@ -1376,7 +1232,6 @@ async def switch_world(req: WorldSwitchRequest) -> WorldSwitchResponse:
     response_model=WorldSchema,
 )
 async def get_campaign_world(campaign_id: str) -> WorldSchema:
-    """Return the WorldSchema for the campaign's currently active world."""
     schema = await world_registry.get_campaign_schema(campaign_id)
     if schema is None:
         raise HTTPException(
