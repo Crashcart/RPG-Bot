@@ -38,10 +38,10 @@ Statuses: `[x]` completed · `[-]` in-progress · `[ ]` not-started
 - [x] Create `compose.alpha.yml`, `compose.beta.yml`, `compose.prod.yml` tier overrides
 
 ### Pending
-- [ ] Add ComfyUI service to `docker-compose.yml`
+- [x] Add ComfyUI service to `docker-compose.yml`
 - [ ] Expand `PropheticBuffer.run_idle_prefetch()` — music/portraits/scene images/recaps during idle
 - [ ] Brand filtering — update sub-agent post-processor to allow PDF-sourced names
-- [ ] Expose `handout_svc`, `faction_svc`, `gemini`, `world_registry` on `app.state` in `main.py` lifespan so web_ui routes can resolve them
+- [x] Expose `handout_svc`, `faction_svc`, `gemini`, `world_registry` on `app.state` in `main.py` lifespan so web_ui routes can resolve them
 
 ---
 
