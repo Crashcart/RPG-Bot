@@ -131,8 +131,6 @@ class SubAgentDispatcher:
         filter with up to _MAX_RETRIES correction attempts, and return the
         (possibly stripped) result.
         """
-        from orchestrator.services.ollama_client import OllamaClient  # local import avoids cycles
-
         preferred_role = _TASK_ROLE_MAP.get(task.task_type, _ACTOR_ROLE)
 
         # Node selection: preferred role → narrative fallback → any Ollama

@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import logging
 import re
 import uuid
@@ -304,9 +303,8 @@ class PDFProcessorService:
     @staticmethod
     def _render_page_sync(doc, page_num: int, dpi: int) -> bytes:
         """Render a PDF page to PNG bytes — called inside run_in_executor."""
-        page   = doc.load_page(page_num)
-        matrix = doc.load_page(page_num).deformation_matrix  # identity by default
-        zoom   = dpi / 72.0
+        page = doc.load_page(page_num)
+        zoom = dpi / 72.0
         import fitz
         mat    = fitz.Matrix(zoom, zoom)
         pix    = page.get_pixmap(matrix=mat, alpha=False)  # type: ignore[attr-defined]

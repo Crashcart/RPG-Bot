@@ -37,7 +37,6 @@ from orchestrator.pipeline import (
 from orchestrator.routers import auth_router, web_router
 from orchestrator.schemas.payloads import (
     CampfireStatus,
-    DirectiveType,
     DowntimeSubmitRequest,
     DowntimeTaskStatus,
     GMDirective,
@@ -1035,8 +1034,7 @@ async def api_music_feedback(req: dict) -> dict:
 @app.post("/api/music/generate", summary="Manually trigger music generation for a scene type")
 async def api_music_generate(req: dict) -> dict:
     from orchestrator.prompts.gm_prompts import MUSIC_SCENE_PROMPTS
-    scene_type  = req.get("scene_type", "exploration")
-    campaign_id = req.get("campaign_id", "")
+    scene_type   = req.get("scene_type", "exploration")
     music_prompt = MUSIC_SCENE_PROMPTS.get(scene_type, MUSIC_SCENE_PROMPTS["exploration"])
     audio_url = await gemini.generate_music(music_prompt, scene_type, db=db)
     return {
@@ -1123,8 +1121,6 @@ async def api_mark_narrative_delivered(intent_id: str, guild_id: str) -> dict:
 
 @app.websocket("/ws/telemetry")
 async def telemetry_websocket(websocket: WebSocket):
-    import asyncio
-
     session = websocket.session if hasattr(websocket, "session") else {}
     if not session.get("admin_id"):
         await websocket.close(code=1008, reason="Unauthorized — admin session required")
