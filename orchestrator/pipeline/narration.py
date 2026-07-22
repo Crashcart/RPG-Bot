@@ -42,13 +42,14 @@ class NarrationPhase:
 
     async def narrate(
         self,
-        resolution:        OllamaResolutionPayload,
-        commit:            StateCommitPayload,
-        character:         CharacterSnapshot,
-        player_intent:     str,
-        campaign_system:   str,
-        campaign_id:       str,
-        active_directives: list[GMDirective] | None = None,
+        resolution:         OllamaResolutionPayload,
+        commit:             StateCommitPayload,
+        character:          CharacterSnapshot,
+        player_intent:      str,
+        campaign_system:    str,
+        campaign_id:        str,
+        active_directives:  list[GMDirective] | None = None,
+        pdf_name_allowlist: list[str] | None = None,
     ) -> NarrativeResponsePayload:
         """Delegate Phase 4 entirely to the GM Director."""
         return await self._gm.narrate(
@@ -59,4 +60,5 @@ class NarrationPhase:
             campaign_system=campaign_system,
             campaign_id=campaign_id,
             active_directives=active_directives,
+            pdf_name_allowlist=pdf_name_allowlist,
         )

@@ -37,7 +37,6 @@ node-health and TTFT benchmarking as all other Ollama calls.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import TYPE_CHECKING
 

@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block title %}Factions{% endblock %}
+{% block content %}
+
+<style>
+  .reputation-bar-bg {
+    width: 100%; height: 6px;
+    background: var(--border); border-radius: 3px; overflow: hidden;
+  }
+  .reputation-bar-fill {
+    height: 100%; border-radius: 3px; transition: width 0.3s;
+  }
+  .rep-allied   { background: var(--green); }
+  .rep-friendly { background: #7ec8a0; }
+  .rep-neutral  { background: var(--muted); }
+  .rep-cautious { background: #c9a84c; }
+  .rep-hostile  { background: #d47a44; }
+  .rep-enemy    { background: var(--red); }
+</style>
+
+<div class="page-header">
+  <h1><span>⚔</span> Faction Standings</h1>
+  <p>Track player reputation with named factions. Scores range from −100 (Enemy) to +100 (Allied).</p>
+</div>
+
+<!-- Filters -->
+<div class="filter-bar">
+  <form method="get" style="display:flex;gap:8px;align-items:center;flex:1">
+    <select name="campaign_id" onchange="this.form.submit()" style="min-width:220px">
+      <option value="">— select campaign —</option>
+      {% for c in campaigns %}
+      <option value="{{ c.id }}" {% if c.id == campaign_id %}selected{% endif %}>
+        {{ c.name }}
+      </option>
+      {% endfor %}
+    </select>
+    {% if campaign_id %}
+    <input type="text" name="player_id" value="{{ player_id }}"
+           placeholder="Player Discord snowflake (optional)"
+           style="width:240px">
+    <button type="submit" class="btn btn-ghost btn-sm">Filter</button>
+    {% endif %}
+  </form>
+</div>
+
+{% if campaign_id %}
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start">
+
+  <!-- Faction standings table -->
+  <div>
+    {% if factions %}
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">
+          {% if player_id %}Player {{ player_id[:8] }}… Standings{% else %}All Factions{% endif %}
+        </span>
+        <span class="text-muted" style="font-size:12px">{{ factions|length }} faction(s)</span>
+      </div>
+      {% for f in factions %}
+      <div style="padding:14px 20px;border-bottom:1px solid var(--border)">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+          <span style="font-weight:600;color:var(--text)">{{ f.name }}</span>
+          <span style="font-size:11px;font-weight:700;
+            {% if f.score >= 75 %}color:var(--green)
+            {% elif f.score >= 40 %}color:#7ec8a0
+            {% elif f.score >= 10 %}color:var(--muted)
+            {% elif f.score >= -25 %}color:#c9a84c
+            {% elif f.score >= -60 %}color:#d47a44
+            {% else %}color:var(--red){% endif %}">
+            {{ f.label }} ({{ '%+d'|format(f.score) }})
+          </span>
+        </div>
+        {% if f.description %}
+        <p style="font-size:11px;color:var(--muted);margin-bottom:8px">{{ f.description }}</p>
+        {% endif %}
+        <div class="reputation-bar-bg">
+          <div class="reputation-bar-fill rep-{{ f.label|lower }}"
+               style="width:{{ ((f.score + 100) / 200 * 100)|int }}%"></div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">
+      <div class="empty-icon">🏴</div>
+      <p>No factions defined for this campaign yet.</p>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Right column: create faction + adjust reputation -->
+  <div>
+    <!-- Add / edit faction -->
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-header">
+        <span class="card-title">Add Faction</span>
+      </div>
+      <div class="card-body">
+        <form method="post" action="/web/factions/upsert?campaign_id={{ campaign_id }}">
+          <div class="form-row">
+            <label>Faction Name</label>
+            <input type="text" name="name" placeholder="The Iron Conclave" required>
+          </div>
+          <div class="form-row">
+            <label>Description (optional)</label>
+            <input type="text" name="description" placeholder="Merchant guild controlling the eastern docks">
+          </div>
+          <button type="submit" class="btn btn-gold" style="width:100%">+ Add Faction</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- Manual reputation adjustment -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Adjust Reputation</span>
+      </div>
+      <div class="card-body">
+        <form method="post" action="/web/factions/adjust?campaign_id={{ campaign_id }}">
+          <div class="form-row">
+            <label>Faction</label>
+            <select name="faction_name" required>
+              <option value="">— select faction —</option>
+              {% for f in factions %}
+              <option value="{{ f.name }}">{{ f.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="form-row">
+            <label>Player Discord Snowflake</label>
+            <input type="text" name="player_id" value="{{ player_id }}"
+                   placeholder="123456789012345678" required>
+          </div>
+          <div class="form-row">
+            <label>Delta (−15 to +15)</label>
+            <input type="text" name="delta" placeholder="+5 or -10" required>
+          </div>
+          <div class="form-row">
+            <label>Reason (shown in logs)</label>
+            <input type="text" name="reason" placeholder="Aided the Conclave during the dockside raid">
+          </div>
+          <button type="submit" class="btn btn-gold" style="width:100%">Apply Delta</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+{% else %}
+<div class="empty">
+  <div class="empty-icon">⚔</div>
+  <p>Select a campaign to view faction standings.</p>
+</div>
+{% endif %}
+
+{% endblock %}

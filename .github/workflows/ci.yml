@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [alpha, beta, main]
+  pull_request:
+    branches: [alpha, beta, main]
+
+jobs:
+  governance:
+    name: Governance File Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Required governance files present
+        run: |
+          missing=0
+          for f in \
+            .github/copilot-instructions.md \
+            .github/REPO_CONFIG.md \
+            .github/TODO.md \
+            .github/PLANNING.md \
+            .github/BRANCH_AWARE_FILES.md \
+            .github/REPO_SETUP_GUIDE.md; do
+            if [ ! -f "$f" ]; then
+              echo "MISSING: $f"
+              missing=$((missing + 1))
+            fi
+          done
+          if [ $missing -gt 0 ]; then
+            echo "::error::$missing governance file(s) missing. See .github/REPO_SETUP_GUIDE.md."
+            exit 1
+          fi
+          echo "All governance files present."
+
+  lint:
+    name: Python Lint & Syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Ruff lint — orchestrator
+        run: ruff check orchestrator/ --select E,F,W --ignore E501
+
+      - name: Ruff lint — discord-bot
+        run: ruff check discord-bot/ --select E,F,W --ignore E501
+
+      - name: Python syntax check — orchestrator
+        run: |
+          find orchestrator -name "*.py" | while read f; do
+            python -m py_compile "$f" || { echo "Syntax error in $f"; exit 1; }
+          done
+
+      - name: Python syntax check — discord-bot
+        run: |
+          find discord-bot -name "*.py" | while read f; do
+            python -m py_compile "$f" || { echo "Syntax error in $f"; exit 1; }
+          done
+
+  migrations:
+    name: Migration Convention Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Migration filenames follow 0NN_*.sql convention
+        run: |
+          bad=0
+          for f in db/migrations/*.sql; do
+            base=$(basename "$f")
+            if ! echo "$base" | grep -qE '^[0-9]{3}_[a-z0-9_]+\.sql$'; then
+              echo "BAD FILENAME: $f (must match 0NN_snake_case.sql)"
+              bad=$((bad + 1))
+            fi
+          done
+          if [ $bad -gt 0 ]; then
+            echo "::error::$bad migration(s) with non-standard filenames."
+            exit 1
+          fi
+          echo "All migrations correctly named."
+
+      - name: No modifications to existing migrations
+        run: |
+          # Fail if any existing migration was modified (new files are fine)
+          if git diff --name-only origin/${{ github.base_ref }}...HEAD 2>/dev/null \
+              | grep -E '^db/migrations/[0-9]{3}_.*\.sql$'; then
+            echo "::error::Existing migration file(s) were modified. Migrations are immutable — create a new one."
+            exit 1
+          fi
+          echo "No existing migrations modified."
+
+  bash:
+    name: Bash Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bash syntax check on all .sh files
+        run: |
+          bad=0
+          find . -name "*.sh" -not -path "./.git/*" | while read f; do
+            bash -n "$f" || { echo "Syntax error in $f"; bad=$((bad + 1)); }
+          done
+          if [ $bad -gt 0 ]; then exit 1; fi
+          echo "All shell scripts syntactically valid."
+
+  schema:
+    name: Payload Schema Import Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install minimal deps for schema check
+        run: pip install pydantic pydantic-settings
+
+      - name: Schema compiles cleanly
+        run: python -m py_compile orchestrator/schemas/payloads.py
+        env:
+          PYTHONPATH: .

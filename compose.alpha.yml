@@ -1,0 +1,37 @@
+# compose.alpha.yml — Alpha tier overrides
+# Usage: docker compose -f docker-compose.yml -f compose.alpha.yml up -d
+#
+# Alpha is the integration branch (claude/* → alpha PRs).
+# Settings: debug logging on, relaxed resource caps, hot-reload where possible.
+
+services:
+
+  scribe:
+    environment:
+      - LOG_LEVEL=DEBUG
+      - ENVIRONMENT=alpha
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+
+  ironclad-discord:
+    environment:
+      - LOG_LEVEL=DEBUG
+      - ENVIRONMENT=alpha
+
+  brain:
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+
+  ironclad-db:
+    environment:
+      - POSTGRES_STATEMENT_TIMEOUT=120000
+
+  pulse:
+    environment:
+      - LOG_LEVEL=DEBUG

@@ -86,8 +86,6 @@ from orchestrator.prompts.gm_prompts import (
     GM_SYSTEM_PROMPT,
     MUSIC_SCENE_PROMPTS,
     STRUCTURAL_PATTERNS,
-    SUBAGENT_SCENE_DESCRIBER_PROMPT,
-    SUBAGENT_SOUND_DIRECTOR_PROMPT,
 )
 from orchestrator.prompts.immersion_prompts import (
     AMBIENT_AUDIO_MAP,
@@ -99,7 +97,6 @@ from orchestrator.prompts.immersion_prompts import (
     is_combat_end,
 )
 from orchestrator.schemas.payloads import (
-    ActionOutcome,
     ChannelDirective,
     CharacterSnapshot,
     GMDirective,
@@ -171,13 +168,14 @@ class GMDirector:
 
     async def narrate(
         self,
-        resolution:       OllamaResolutionPayload,
-        commit:           StateCommitPayload,
-        character:        CharacterSnapshot,
-        player_intent:    str,
-        campaign_system:  str,
-        campaign_id:      str,
-        active_directives: list["GMDirective"] | None = None,
+        resolution:         OllamaResolutionPayload,
+        commit:             StateCommitPayload,
+        character:          CharacterSnapshot,
+        player_intent:      str,
+        campaign_system:    str,
+        campaign_id:        str,
+        active_directives:  list["GMDirective"] | None = None,
+        pdf_name_allowlist: list[str] | None = None,
     ) -> NarrativeResponsePayload:
         """
         Full GM Director pipeline: plan → delegate → synthesize → filter.
@@ -253,7 +251,11 @@ class GMDirector:
             ))
 
         # ── Step 4b: Sub-Agent Dispatch ────────────────────────────────────────
-        sub_results = await self._dispatcher.dispatch_all(plan.sub_tasks)
+        pdf_allowlist = frozenset(pdf_name_allowlist or [])
+        sub_results = await self._dispatcher.dispatch_all(
+            plan.sub_tasks,
+            pdf_allowlist=pdf_allowlist,
+        )
 
         if self._telemetry and plan.sub_tasks:
             actor_names = ", ".join(t.entity_name for t in plan.sub_tasks[:5])

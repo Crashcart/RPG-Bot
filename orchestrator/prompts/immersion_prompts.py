@@ -27,8 +27,6 @@ that trigger a channel_directive (move player to dungeon/prison/hospital).
 
 from __future__ import annotations
 
-import re
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Whisper System — Paranoia / Private Perception
 # ─────────────────────────────────────────────────────────────────────────────

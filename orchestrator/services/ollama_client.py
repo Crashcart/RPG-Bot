@@ -16,17 +16,14 @@ from orchestrator.prompts.guardrails import (
 )
 from orchestrator.schemas.payloads import (
     ActionOutcome,
-    CharacterSnapshot,
     ContextAssemblyPayload,
     DiceRequest,
-    MechanicalTruth,
     NarrativeRequestPayload,
     NarrativeResponsePayload,
     OllamaResolutionPayload,
     OperationalStatus,
     StateDelta,
     StatDelta,
-    StoryFact,
     SubsystemDelta,
     VehicleDelta,
 )
