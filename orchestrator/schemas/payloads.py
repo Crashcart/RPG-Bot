@@ -53,6 +53,21 @@ class MultimediaType(str, Enum):
     AMBIENT   = "ambient"
 
 
+class ActionCategory(str, Enum):
+    """
+    Deterministic intent category assigned by the Python classifier in Phase 1
+    before any LLM touches the input.  The mechanical engine echoes this value;
+    the GM Director reads it to enforce stealth narration guardrails.
+    """
+    COMBAT        = "combat"
+    STEALTH       = "stealth"
+    SKILL_CHECK   = "skill_check"
+    SAVING_THROW  = "saving_throw"
+    SOCIAL        = "social"
+    EXPLORATION   = "exploration"
+    UNKNOWN       = "unknown"
+
+
 class OperationalStatus(str, Enum):
     OPERATIONAL = "OPERATIONAL"
     DAMAGED     = "DAMAGED"
@@ -158,6 +173,14 @@ class ContextAssemblyPayload(BaseModel):
     )
     rule_chunks:        list[RuleChunk]      = Field(default_factory=list)
     raw_input:          str
+    action_category:    ActionCategory = Field(
+        default=ActionCategory.UNKNOWN,
+        description=(
+            "Deterministic intent category set by the Python keyword classifier "
+            "before any LLM sees the input. Used to select the correct mechanical "
+            "resolution path and enforce stealth narration guardrails."
+        ),
+    )
     # Rolling Vault: formatted history string injected before the prompt.
     # Empty on the very first turn of a campaign.
     rolling_context:    str = Field(
@@ -251,6 +274,18 @@ class OllamaResolutionPayload(BaseModel):
     roll_result:        int  = Field(..., description="Final total after modifiers")
     outcome:            ActionOutcome
     state_delta:        StateDelta
+    action_category:    ActionCategory = Field(
+        default=ActionCategory.UNKNOWN,
+        description="Echoed from Phase 1 context; the LLM confirms or inherits this value.",
+    )
+    is_detected:        bool = Field(
+        default=False,
+        description=(
+            "Stealth only: True = the character was spotted by an NPC this turn. "
+            "Set by the mechanical engine; the narrator must describe NPC awareness "
+            "only when this is True."
+        ),
+    )
     rulebook_citations: list[str]  = Field(default_factory=list)
     reasoning:          str        = Field(
         default="",
@@ -369,6 +404,18 @@ class MechanicalTruth(BaseModel):
     stat_changes:       list[StatDelta]
     status_change:      CharacterStatus | None
     rulebook_citations: list[str]
+    action_category:    ActionCategory = Field(
+        default=ActionCategory.UNKNOWN,
+        description="Resolved action category; triggers stealth narration guardrails when STEALTH.",
+    )
+    is_hidden:          bool = Field(
+        default=False,
+        description=(
+            "Stealth only: True = character remains undetected after this action. "
+            "When True the narrator must describe only what the character's own senses "
+            "perceive — never NPC awareness or reactions to the character's presence."
+        ),
+    )
 
 
 class NarrativeRequestPayload(BaseModel):
