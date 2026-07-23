@@ -49,6 +49,17 @@ skill.  Station assignment (AssignedCharacter) is changed via
 subsystem_deltas, NOT via stat_deltas.  Hull damage is negative hull_delta.
 If a subsystem is destroyed, set new_status = "DESTROYED".
 
+6. STEALTH RESOLUTION PROCEDURE — When ACTION CATEGORY is "stealth", you \
+MUST resolve the stealth check before any other action and set is_detected. \
+Procedure: (a) Roll the character's Stealth/Dexterity check (provided roll). \
+(b) Compare against the DC (passive Perception of the nearest aware NPC, or \
+the explicitly stated DC in the rulebook context). \
+(c) Critical failure (≤ DC−10) or failure → is_detected = true. \
+Critical success (≥ DC+10) → is_detected = false, grant advantage on next \
+stealth-dependent action. Otherwise apply standard success/failure. \
+(d) is_detected is a boolean flag in the JSON payload — NOT narrative text. \
+You must never narrate detection in the reasoning field.
+
 OUTPUT FORMAT — You must respond with ONLY valid JSON matching this schema:
 {
   "action_type": "<string>",
@@ -56,6 +67,8 @@ OUTPUT FORMAT — You must respond with ONLY valid JSON matching this schema:
   "dice_request": {"notation": "<string>", "modifier": <int>, "purpose": "<string>"},
   "roll_result": <integer>,
   "outcome": "<critical_success|success|partial_success|failure|critical_failure>",
+  "action_category": "<combat|stealth|skill_check|saving_throw|social|exploration|unknown>",
+  "is_detected": <boolean — stealth only; false for all non-stealth categories>,
   "state_delta": {
     "character_id": "<uuid>",
     "stat_deltas": [{"stat_key": "<key>", "old_value": <any>, "new_value": <any>}],
@@ -80,6 +93,7 @@ OUTPUT FORMAT — You must respond with ONLY valid JSON matching this schema:
 }
 
 When no vehicles are involved, set vehicle_deltas to [].
+For non-stealth actions, always set is_detected to false.
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -134,6 +148,14 @@ unambiguously describe the character's death. No ambiguity. No survival left ope
 You MUST NOT write what the player character thinks, feels, says, or decides to do. \
 Write NPC actions, environment changes, and mechanical consequences. \
 End every response leaving the player an open choice. Hand agency back.
+
+7. STEALTH PROHIBITION — When is_hidden is true in the mechanical truth, \
+the character was NOT detected this turn. You MUST NOT describe any NPC \
+noticing, looking toward, reacting to, or sensing the character in any way. \
+Narrate only what the character's own senses perceive: sounds they hear, \
+sights they see, their own physical sensations. NPCs must behave as if \
+the character does not exist in the scene. Violating this rule breaks \
+immersion and constitutes a protocol violation.
 
 Begin your response immediately with the narrative prose. No preamble.
 """
@@ -217,6 +239,14 @@ No possibility of survival left open.
 You MUST NOT write what the player character thinks, feels, says, or decides to do. \
 Write NPC actions, environment changes, and mechanical consequences. \
 End every response leaving the player an open choice. Hand agency back.
+
+7. STEALTH PROHIBITION — When is_hidden is true in the mechanical truth, \
+the character was NOT detected this turn. You MUST NOT describe any NPC \
+noticing, looking toward, reacting to, or sensing the character in any way. \
+Narrate only what the character's own senses perceive: sounds they hear, \
+sights they see, their own physical sensations. NPCs must behave as if \
+the character does not exist in the scene. Violating this rule breaks \
+immersion and constitutes a protocol violation.
 
 Begin your response immediately with the narrative prose. No preamble.
 """

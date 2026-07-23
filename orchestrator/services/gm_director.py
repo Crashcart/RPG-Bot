@@ -99,6 +99,7 @@ from orchestrator.prompts.immersion_prompts import (
     is_combat_end,
 )
 from orchestrator.schemas.payloads import (
+    ActionCategory,
     ActionOutcome,
     ChannelDirective,
     CharacterSnapshot,
@@ -666,6 +667,11 @@ def _format_mechanical_context(resolution: OllamaResolutionPayload) -> str:
         if resolution.state_delta.status_change else ""
     )
 
+    stealth_line = ""
+    if resolution.action_category == ActionCategory.STEALTH:
+        detection_state = "DETECTED" if resolution.is_detected else "HIDDEN"
+        stealth_line = f"\nStealth: {detection_state}"
+
     return (
         f"Action type: {resolution.action_type}\n"
         f"Roll: {resolution.dice_request.notation} → {resolution.roll_result} "
@@ -673,6 +679,7 @@ def _format_mechanical_context(resolution: OllamaResolutionPayload) -> str:
         f"Stat changes:\n{stat_block}\n"
         f"Inventory changes:\n{inv_block}\n"
         f"{status_line}"
+        f"{stealth_line}"
     ).strip()
 
 

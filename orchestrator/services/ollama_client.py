@@ -15,6 +15,7 @@ from orchestrator.prompts.guardrails import (
     build_local_narrative_prompt,
 )
 from orchestrator.schemas.payloads import (
+    ActionCategory,
     ActionOutcome,
     CharacterSnapshot,
     ContextAssemblyPayload,
@@ -206,6 +207,7 @@ class OllamaClient:
         return (
             f"ACTIVE SYSTEM: {char.system}\n\n"
             f"{rolling_block}"
+            f"ACTION CATEGORY: {ctx.action_category.value}\n\n"
             f"CHARACTER STATE:\n{json.dumps(char.stats, indent=2)}\n\n"
             f"INVENTORY (mechanical fields only):\n{inventory_text}\n"
             f"{vehicle_block}\n"
@@ -262,6 +264,13 @@ class OllamaClient:
             vehicle_deltas=vehicle_deltas,
         )
 
+        # Parse action_category — prefer LLM echo, fall back to UNKNOWN
+        raw_category = d.get("action_category", "unknown")
+        try:
+            action_category = ActionCategory(raw_category)
+        except ValueError:
+            action_category = ActionCategory.UNKNOWN
+
         return OllamaResolutionPayload(
             intent_id=intent_id,
             action_type=d.get("action_type", "unknown"),
@@ -270,6 +279,8 @@ class OllamaClient:
             roll_result=roll_result,
             outcome=ActionOutcome(d.get("outcome", ActionOutcome.FAILURE)),
             state_delta=delta,
+            action_category=action_category,
+            is_detected=bool(d.get("is_detected", False)),
             rulebook_citations=d.get("rulebook_citations", []),
             reasoning=d.get("reasoning", ""),
         )
@@ -301,6 +312,8 @@ class OllamaClient:
             "stat_changes":       [s.model_dump() for s in truth.stat_changes],
             "status_change":      truth.status_change.value if truth.status_change else None,
             "rulebook_citations": truth.rulebook_citations,
+            "action_category":    truth.action_category.value,
+            "is_hidden":          truth.is_hidden,
         }, indent=2)
 
         # Build story context lines

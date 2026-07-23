@@ -1,0 +1,23 @@
+[2026-07-23T00:00:00Z] [INFO] [INIT] Initialized for crashcart/rpg-bot
+[2026-07-23T00:00:01Z] [CONFIG] Loaded .github/docker-optimization.md
+[2026-07-23T00:00:02Z] [DISCOVERY] Issue #25 enhancement clear has_pr
+[2026-07-23T00:00:02Z] [DISCOVERY] Issue #24 no-label clear has_pr
+[2026-07-23T00:00:02Z] [DISCOVERY] Issue #23 no-label clear has_pr
+[2026-07-23T00:00:02Z] [DISCOVERY] Issue #22 no-label clear has_pr
+[2026-07-23T00:00:02Z] [DISCOVERY] Issue #21 no-label clear has_pr
+[2026-07-23T00:00:02Z] [DISCOVERY] Issue #19 enhancement clear has_pr
+[2026-07-23T00:00:02Z] [DISCOVERY] Issue #18 no-label clear has_pr
+[2026-07-23T00:00:02Z] [DISCOVERY] Issue #17 no-label clear has_pr
+[2026-07-23T00:00:02Z] [DISCOVERY] Issue #16 enhancement clear has_pr
+[2026-07-23T00:00:02Z] [DISCOVERY] Issue #15 enhancement clear has_pr
+[2026-07-23T00:00:02Z] [DISCOVERY] Issue #14 enhancement clear has_pr
+[2026-07-23T00:00:02Z] [DISCOVERY] Issue #13 enhancement clear has_pr
+[2026-07-23T00:00:02Z] [DISCOVERY] Issue #12 no-label clear has_pr
+[2026-07-23T00:00:02Z] [DISCOVERY] Issue #11 enhancement clear no_claude_pr — SELECTED
+[2026-07-23T00:00:02Z] [DISCOVERY] Issue #10 enhancement clear has_pr
+[2026-07-23T00:00:02Z] [DISCOVERY] Issue #9 no-label clear has_pr
+[2026-07-23T00:00:02Z] [DISCOVERY] Issue #8 enhancement clear has_pr
+[2026-07-23T00:00:02Z] [DISCOVERY] Issue #7 enhancement clear has_pr
+[2026-07-23T00:00:02Z] [DISCOVERY] Issue #6 enhancement/help-wanted clear has_pr
+[2026-07-23T00:00:03Z] [DISCOVERY COMPLETE] 19 issues found; 18 with existing claude/ PRs; selected #11 (no claude/ branch PR exists)
+[2026-07-23T00:00:04Z] [PHASE 1/4] Branch claude/feat/issue-11-stealth-mechanics created from main

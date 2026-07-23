@@ -12,6 +12,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from orchestrator.schemas.payloads import (
+    ActionCategory,
     CharacterSnapshot,
     ContextAssemblyPayload,
     IntentPayload,
@@ -34,6 +35,93 @@ _VEHICLE_KEYWORDS = frozenset({
     "autopilot", "drive", "port", "starboard", "bow", "stern",
     "fire", "shoot", "target", "navigate",
 })
+
+# ── Deterministic intent classifier ──────────────────────────────────────────
+# Priority-ordered keyword sets for action category classification.
+# Evaluated top-to-bottom; first match wins.  This runs in pure Python before
+# any LLM sees the input, ensuring the mechanical engine always receives the
+# correct resolution path regardless of model output.
+
+_STEALTH_KEYWORDS = frozenset({
+    "sneak", "hide", "conceal", "stealth", "shadow", "stalk", "creep",
+    "skulk", "slink", "tiptoe", "disappear", "vanish", "blend",
+    "camouflage", "lurk", "ambush", "unseen", "undetected", "invisible",
+    "silent", "quietly", "silently",
+})
+
+_COMBAT_KEYWORDS = frozenset({
+    "attack", "strike", "slash", "stab", "shoot", "punch",
+    "kick", "swing", "hit", "thrust", "parry", "dodge", "block",
+    "charge", "cast", "spell", "fireball", "arrow", "bolt",
+    "draw", "sword", "dagger", "axe", "bow", "gun", "pistol", "rifle",
+    "grenade", "bomb", "explosion", "kill", "fight", "combat",
+    "grapple", "wrestle", "disarm", "execute",
+})
+
+_SAVING_THROW_KEYWORDS = frozenset({
+    "resist", "saving throw", "save vs", "constitution save",
+    "dexterity save", "wisdom save", "fortitude", "reflex", "will save",
+    "endure", "withstand", "brace", "poison", "disease",
+})
+
+_SKILL_CHECK_KEYWORDS = frozenset({
+    "perception", "investigate", "search", "pick", "lockpick", "disable",
+    "climb", "jump", "swim", "acrobatics", "athletics", "survival", "track",
+    "craft", "hack", "medicine", "treat", "recall", "knowledge",
+    "detect", "notice", "examine", "inspect",
+})
+
+_SOCIAL_KEYWORDS = frozenset({
+    "talk", "speak", "say", "ask", "tell", "negotiate", "bargain",
+    "barter", "beg", "plead", "charm", "seduce", "flirt", "threaten",
+    "bribe", "convince", "persuade", "converse", "greet", "introduce",
+    "debate", "argue",
+})
+
+_EXPLORATION_KEYWORDS = frozenset({
+    "move", "go", "walk", "run", "travel", "explore", "open", "close",
+    "enter", "exit", "leave", "approach", "look", "listen", "touch",
+    "take", "grab", "pick up", "use", "activate", "rest", "camp",
+    "wait", "read", "map", "navigate",
+})
+
+
+def _classify_action_category(raw_input: str) -> ActionCategory:
+    """
+    Classify a player's free-text action into a deterministic ActionCategory.
+
+    Runs entirely in Python before any LLM call.  Priority order ensures that
+    a stealth action is never misclassified as combat even when both keywords
+    appear (e.g. "I sneak up and stab the guard").
+    """
+    lower = raw_input.lower()
+    tokens = set(lower.split())
+
+    # Priority 1 — Stealth (highest: "sneak attack" is still stealth intent)
+    if tokens & _STEALTH_KEYWORDS or any(kw in lower for kw in _STEALTH_KEYWORDS):
+        return ActionCategory.STEALTH
+
+    # Priority 2 — Combat
+    if tokens & _COMBAT_KEYWORDS or any(kw in lower for kw in _COMBAT_KEYWORDS):
+        return ActionCategory.COMBAT
+
+    # Priority 3 — Saving Throw (multi-word phrases need substring check)
+    if any(kw in lower for kw in _SAVING_THROW_KEYWORDS):
+        return ActionCategory.SAVING_THROW
+
+    # Priority 4 — Skill Check
+    if tokens & _SKILL_CHECK_KEYWORDS or any(kw in lower for kw in _SKILL_CHECK_KEYWORDS):
+        return ActionCategory.SKILL_CHECK
+
+    # Priority 5 — Social
+    if tokens & _SOCIAL_KEYWORDS or any(kw in lower for kw in _SOCIAL_KEYWORDS):
+        return ActionCategory.SOCIAL
+
+    # Priority 6 — Exploration
+    if tokens & _EXPLORATION_KEYWORDS or any(kw in lower for kw in _EXPLORATION_KEYWORDS):
+        return ActionCategory.EXPLORATION
+
+    return ActionCategory.UNKNOWN
 
 
 def _action_involves_vehicle(raw_input: str) -> bool:
@@ -106,12 +194,16 @@ class IngestionPhase:
         if self._rolling_vault:
             rolling_context = await self._rolling_vault.get_context_block(campaign_id)
 
+        # ── 6. Deterministic Action Classification ────────────────────────────
+        action_category = _classify_action_category(intent.raw_input)
+
         logger.info(
-            "Phase 1 complete: character=%s rule_chunks=%d vehicles=%d vault=%s",
+            "Phase 1 complete: character=%s rule_chunks=%d vehicles=%d vault=%s category=%s",
             character.name,
             len(rule_chunks),
             len(vehicle_context),
             "yes" if rolling_context else "empty",
+            action_category.value,
         )
 
         return ContextAssemblyPayload(
@@ -121,5 +213,6 @@ class IngestionPhase:
             vehicle_context=vehicle_context,
             rule_chunks=rule_chunks,
             raw_input=intent.raw_input,
+            action_category=action_category,
             rolling_context=rolling_context,
         )
