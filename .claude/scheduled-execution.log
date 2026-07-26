@@ -1,0 +1,25 @@
+[2026-07-26T11:12:53Z] [CONFIG] Loaded .github/docker-optimization.md (Docker optimization guide — no tier/label/workflow rules found)
+[2026-07-26T11:12:53Z] [INFO] No copilot-instructions.md, PR templates, or label configs found in .github/
+[2026-07-26T11:12:53Z] [INFO] Initialized for crashcart/rpg-bot — defaulting to standard priority heuristics
+[2026-07-26T11:19:46Z] [DISCOVERY] Issue #25 [enhancement] [2 comments] [has PR #61]
+[2026-07-26T11:19:46Z] [DISCOVERY] Issue #24 [enhancement] [2 comments] [has PR #60]
+[2026-07-26T11:19:46Z] [DISCOVERY] Issue #23 [enhancement] [2 comments] [has PR #63]
+[2026-07-26T11:19:46Z] [DISCOVERY] Issue #22 [enhancement] [2 comments] [has PR #62]
+[2026-07-26T11:19:46Z] [DISCOVERY] Issue #21 [enhancement] [2 comments] [has PR #59]
+[2026-07-26T11:19:46Z] [DISCOVERY] Issue #19 [enhancement] [3 comments] [has PR #48]
+[2026-07-26T11:19:46Z] [DISCOVERY] Issue #18 [enhancement] [2 comments] [has PR #64]
+[2026-07-26T11:19:46Z] [DISCOVERY] Issue #17 [enhancement] [2 comments] [has PR #55]
+[2026-07-26T11:19:46Z] [DISCOVERY] Issue #16 [enhancement] [2 comments] [has PR #54]
+[2026-07-26T11:19:46Z] [DISCOVERY] Issue #15 [enhancement] [2 comments] [has PR #56]
+[2026-07-26T11:19:46Z] [DISCOVERY] Issue #14 [enhancement] [2 comments] [has PR #51]
+[2026-07-26T11:19:46Z] [DISCOVERY] Issue #13 [enhancement] [2 comments] [has PR #50]
+[2026-07-26T11:19:46Z] [DISCOVERY] Issue #12 [enhancement] [2 comments] [has PR #49]
+[2026-07-26T11:19:46Z] [DISCOVERY] Issue #11 [enhancement] [3 comments] [has PR #35 + PR #67 — most recently updated 2026-07-23]
+[2026-07-26T11:19:46Z] [DISCOVERY] Issue #10 [enhancement] [2 comments] [has PR #58]
+[2026-07-26T11:19:46Z] [DISCOVERY] Issue #9  [enhancement] [2 comments] [has PR #57]
+[2026-07-26T11:19:46Z] [DISCOVERY] Issue #8  [enhancement] [2 comments] [has PR #65]
+[2026-07-26T11:19:46Z] [DISCOVERY] Issue #7  [enhancement] [2 comments] [has PR #53]
+[2026-07-26T11:19:46Z] [DISCOVERY] Issue #6  [help wanted] [2 comments] [has PR #52]
+[2026-07-26T11:19:46Z] [DISCOVERY COMPLETE] 19 open issues evaluated — all have non-draft PRs from previous cycles. No uncovered issues. 41 total open PRs, none merged since PR #28.
+[2026-07-26T11:19:46Z] [INFO] Selection: No open issue is uncovered. Proceeding with test coverage gap: prophetic_buffer.py + janitor.py have zero tests in any open PR — highest-value new work.
+[2026-07-26T11:19:46Z] [PHASE 1/4] Branch created: claude/test/prophetic-buffer-janitor-coverage
