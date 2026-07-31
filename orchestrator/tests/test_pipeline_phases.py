@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import json
 import pytest
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock
 
 from orchestrator.pipeline.adjudication import AdjudicationPhase
 from orchestrator.pipeline.ingestion import (
@@ -332,7 +331,7 @@ class TestIngestionPhaseAssemble:
     async def test_rag_skipped_when_no_rule_modules(self):
         char = _make_character()
         phase, _, rag, _ = self._make_phase(character=char, rule_modules=[])
-        result = await phase.assemble(_make_intent("I rest."), "camp-001")
+        await phase.assemble(_make_intent("I rest."), "camp-001")
         rag.retrieve_rule_chunks.assert_not_called()
 
     async def test_rolling_vault_context_included(self):
