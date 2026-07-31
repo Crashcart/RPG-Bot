@@ -28,8 +28,6 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
-from uuid import UUID
 
 from orchestrator.config import Settings
 from orchestrator.schemas.payloads import CampfireStatus

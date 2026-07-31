@@ -67,6 +67,18 @@ def _backchannel(request: Request):
 def _telemetry(request: Request):
     return getattr(request.app.state, "telemetry", None)
 
+def _handout_svc(request: Request):
+    return getattr(request.app.state, "handout_svc", None)
+
+def _faction_svc(request: Request):
+    return getattr(request.app.state, "faction_svc", None)
+
+def _gemini(request: Request):
+    return getattr(request.app.state, "gemini", None)
+
+def _world_registry(request: Request):
+    return getattr(request.app.state, "world_registry", None)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Dashboard
@@ -620,3 +632,314 @@ async def settings_channels_delete(
         logger.exception("Channel map delete failed: %s", exc)
         request.session["flash_err"] = str(exc)
     return RedirectResponse("/web/settings", status_code=303)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Handouts
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/handouts", response_class=HTMLResponse)
+async def handouts_page(request: Request, campaign_id: str = "") -> HTMLResponse:
+    db   = _db(request)
+    svc  = _handout_svc(request)
+    tmpl = _tmpl(request)
+
+    campaigns = await db.get_all_campaigns()
+    handouts: list[dict] = []
+
+    if campaign_id and svc:
+        raw = await svc.list_campaign_handouts(campaign_id)
+        for h in raw:
+            recipients = await svc.get_delivery_status(str(h["id"]))
+            h["recipient_count"] = len(recipients)
+        handouts = raw
+
+    return tmpl.TemplateResponse(
+        "handouts.html",
+        {
+            "request":     request,
+            "page":        "handouts",
+            "campaigns":   campaigns,
+            "campaign_id": campaign_id,
+            "handouts":    handouts,
+        },
+    )
+
+
+@router.post("/handouts/create", response_class=RedirectResponse)
+async def handouts_create(
+    request:      Request,
+    campaign_id:  str = "",
+    title:        str = Form(...),
+    handout_type: str = Form("general"),
+    brief:        str = Form(""),
+    content_text: str = Form(""),
+    is_global:    str = Form(""),
+) -> RedirectResponse:
+    svc = _handout_svc(request)
+    if not svc:
+        request.session["flash_err"] = "HandoutService not available."
+        return RedirectResponse(f"/web/handouts?campaign_id={campaign_id}", status_code=303)
+    try:
+        if not content_text.strip():
+            world = None
+            wr = _world_registry(request)
+            if wr and campaign_id:
+                world = await wr.get_world_for_campaign(campaign_id)
+            tone = (world.get("narrative_tone") or "authentic to the campaign's setting") if world else "authentic to the campaign's setting"
+            content_text = await svc.ai_write_handout(
+                campaign_id=campaign_id,
+                title=title,
+                handout_type=handout_type,
+                brief=brief,
+                tone=tone,
+            )
+        await svc.create_handout(
+            campaign_id=campaign_id,
+            title=title,
+            content_text=content_text,
+            handout_type=handout_type,
+            is_global=bool(is_global),
+        )
+        request.session["flash_ok"] = f"Handout '{title}' created."
+    except Exception as exc:
+        logger.exception("Handout create failed: %s", exc)
+        request.session["flash_err"] = str(exc)
+    return RedirectResponse(f"/web/handouts?campaign_id={campaign_id}", status_code=303)
+
+
+@router.post("/handouts/deliver", response_class=RedirectResponse)
+async def handouts_deliver(
+    request:     Request,
+    campaign_id: str = "",
+    handout_id:  str = Form(...),
+    player_id:   str = Form(...),
+) -> RedirectResponse:
+    svc = _handout_svc(request)
+    if not svc:
+        request.session["flash_err"] = "HandoutService not available."
+        return RedirectResponse(f"/web/handouts?campaign_id={campaign_id}", status_code=303)
+    try:
+        await svc.deliver(handout_id.strip(), player_id.strip())
+        request.session["flash_ok"] = f"Handout delivered to player {player_id[:12]}…"
+    except Exception as exc:
+        logger.exception("Handout deliver failed: %s", exc)
+        request.session["flash_err"] = str(exc)
+    return RedirectResponse(f"/web/handouts?campaign_id={campaign_id}", status_code=303)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Factions
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/factions", response_class=HTMLResponse)
+async def factions_page(
+    request:     Request,
+    campaign_id: str = "",
+    player_id:   str = "",
+) -> HTMLResponse:
+    db   = _db(request)
+    svc  = _faction_svc(request)
+    tmpl = _tmpl(request)
+
+    campaigns = await db.get_all_campaigns()
+    factions: list[dict] = []
+
+    if campaign_id and svc:
+        if player_id:
+            factions = await svc.get_standings(player_id, campaign_id)
+        else:
+            raw = await svc.get_all(campaign_id)
+            for f in raw:
+                f["score"] = 0
+                f["label"] = "Neutral"
+            factions = raw
+
+    return tmpl.TemplateResponse(
+        "factions.html",
+        {
+            "request":     request,
+            "page":        "factions",
+            "campaigns":   campaigns,
+            "campaign_id": campaign_id,
+            "player_id":   player_id,
+            "factions":    factions,
+        },
+    )
+
+
+@router.post("/factions/upsert", response_class=RedirectResponse)
+async def factions_upsert(
+    request:     Request,
+    campaign_id: str = "",
+    name:        str = Form(...),
+    description: str = Form(""),
+) -> RedirectResponse:
+    svc = _faction_svc(request)
+    if not svc:
+        request.session["flash_err"] = "FactionService not available."
+        return RedirectResponse(f"/web/factions?campaign_id={campaign_id}", status_code=303)
+    try:
+        await svc.upsert_faction(campaign_id, name.strip(), description.strip())
+        request.session["flash_ok"] = f"Faction '{name}' saved."
+    except Exception as exc:
+        logger.exception("Faction upsert failed: %s", exc)
+        request.session["flash_err"] = str(exc)
+    return RedirectResponse(f"/web/factions?campaign_id={campaign_id}", status_code=303)
+
+
+@router.post("/factions/adjust", response_class=RedirectResponse)
+async def factions_adjust(
+    request:      Request,
+    campaign_id:  str = "",
+    faction_name: str = Form(...),
+    player_id:    str = Form(...),
+    delta:        str = Form(...),
+    reason:       str = Form(""),
+) -> RedirectResponse:
+    svc = _faction_svc(request)
+    if not svc:
+        request.session["flash_err"] = "FactionService not available."
+        return RedirectResponse(f"/web/factions?campaign_id={campaign_id}", status_code=303)
+    try:
+        delta_int = int(delta.strip().lstrip("+"))
+        if not (-15 <= delta_int <= 15):
+            raise ValueError("Delta must be between −15 and +15.")
+        new_score = await svc.adjust(campaign_id, faction_name, player_id.strip(), delta_int)
+        msg = f"{faction_name}: {delta_int:+d} → {new_score}"
+        if reason:
+            msg += f" ({reason})"
+        request.session["flash_ok"] = msg
+    except ValueError as exc:
+        request.session["flash_err"] = str(exc)
+    except Exception as exc:
+        logger.exception("Faction adjust failed: %s", exc)
+        request.session["flash_err"] = str(exc)
+    return RedirectResponse(
+        f"/web/factions?campaign_id={campaign_id}&player_id={player_id}", status_code=303
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GM Advisor
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ADVISOR_SYSTEM = (
+    "You are an expert tabletop RPG game master advisor. "
+    "Given the campaign context, answer the GM's question with specific, actionable advice "
+    "tailored to the active world's tone and recent events. "
+    "Be creative, concise, and avoid generic advice. "
+    "Do not use fourth-wall language — write as if you are a co-GM who knows the campaign."
+)
+
+_ADVISOR_PROMPT = """\
+Active world: {world_name} ({narrative_tone})
+{world_description}
+
+Recent actions:
+{recent_context}
+
+GM question:
+{question}
+"""
+
+
+@router.get("/gm-advisor", response_class=HTMLResponse)
+async def gm_advisor_page(
+    request:     Request,
+    campaign_id: str = "",
+) -> HTMLResponse:
+    db   = _db(request)
+    tmpl = _tmpl(request)
+
+    campaigns      = await db.get_all_campaigns()
+    recent_actions: list[dict] = []
+    world: dict | None = None
+
+    if campaign_id:
+        recent_actions = await db.get_action_log(campaign_id, limit=6) if hasattr(db, "get_action_log") else []
+        wr = _world_registry(request)
+        if wr:
+            try:
+                world = await wr.get_world_for_campaign(campaign_id)
+            except Exception:
+                pass
+
+    return tmpl.TemplateResponse(
+        "gm_advisor.html",
+        {
+            "request":        request,
+            "page":           "gm-advisor",
+            "campaigns":      campaigns,
+            "campaign_id":    campaign_id,
+            "recent_actions": recent_actions,
+            "world":          world,
+            "question":       "",
+            "response":       None,
+        },
+    )
+
+
+@router.post("/gm-advisor/ask", response_class=HTMLResponse)
+async def gm_advisor_ask(
+    request:     Request,
+    campaign_id: str = "",
+    question:    str = Form(...),
+) -> HTMLResponse:
+    db   = _db(request)
+    tmpl = _tmpl(request)
+    gem  = _gemini(request)
+
+    campaigns      = await db.get_all_campaigns()
+    recent_actions: list[dict] = []
+    world: dict | None = None
+    response: str | None = None
+
+    if campaign_id:
+        recent_actions = await db.get_action_log(campaign_id, limit=6) if hasattr(db, "get_action_log") else []
+        wr = _world_registry(request)
+        if wr:
+            try:
+                world = await wr.get_world_for_campaign(campaign_id)
+            except Exception:
+                pass
+
+    if gem and question.strip():
+        recent_ctx = "\n".join(
+            f"- [{a.get('action_type','?')}] {str(a.get('raw_action',''))[:120]}"
+            for a in recent_actions
+        ) or "No recent actions recorded."
+
+        prompt = _ADVISOR_PROMPT.format(
+            world_name=(world or {}).get("display_name", "Unknown World"),
+            narrative_tone=(world or {}).get("narrative_tone", ""),
+            world_description=(world or {}).get("description", ""),
+            recent_context=recent_ctx,
+            question=question.strip(),
+        )
+        try:
+            response = await gem.generate(
+                system=_ADVISOR_SYSTEM,
+                user=prompt,
+                max_tokens=800,
+                temperature=0.75,
+            )
+        except Exception as exc:
+            logger.error("GM Advisor Gemini call failed: %s", exc)
+            response = f"[Advisor unavailable: {exc}]"
+    elif not gem:
+        response = "[Gemini client not configured — add GEMINI_API_KEY to settings.]"
+
+    return tmpl.TemplateResponse(
+        "gm_advisor.html",
+        {
+            "request":        request,
+            "page":           "gm-advisor",
+            "campaigns":      campaigns,
+            "campaign_id":    campaign_id,
+            "recent_actions": recent_actions,
+            "world":          world,
+            "question":       question,
+            "response":       response,
+        },
+    )

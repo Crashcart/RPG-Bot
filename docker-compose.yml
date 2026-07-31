@@ -19,6 +19,7 @@ version: '3.9'
 #   ironclad-csv-sync CSV export worker
 #   media-proxy    Static asset server (:8001)
 #   lavalink       Audio engine (:2333)
+#   comfyui        Image generation — Stable Diffusion (:8188, optional)
 # ─────────────────────────────────────────────────────────────────────────────
 
 networks:
@@ -36,10 +37,12 @@ volumes:
   csv-exports:
   media-assets:
   pdf-uploads:
+  comfyui-models:
+  comfyui-output:
 
 services:
 
-  # ── Scribe (Orchestrator — Pipeline Engine) ──────────────────────────────────
+  # ── Scribe (Orchestrator — Pipeline Engine) ──────────────────────────────────────────
   scribe:
     build:
       context: ./orchestrator
@@ -62,6 +65,7 @@ services:
       - WORLD_DATA_DIR=/app/data
       - LOGS_DIR=/app/logs
       - BACKUPS_DIR=/app/backups
+      - COMFYUI_URL=http://comfyui:8188
     depends_on:
       ironclad-db:
         condition: service_healthy
@@ -84,7 +88,7 @@ services:
       retries: 3
       start_period: 20s
 
-  # ── Discord Bot Listener (Scribe front-end) ───────────────────────────────────
+  # ── Discord Bot Listener (Scribe front-end) ──────────────────────────────────────────
   ironclad-discord:
     build:
       context: ./discord-bot
@@ -100,7 +104,7 @@ services:
       scribe:
         condition: service_healthy
 
-  # ── Brain (Ollama — Local AI, Intel GPU) ──────────────────────────────────────
+  # ── Brain (Ollama — Local AI, Intel GPU) ──────────────────────────────────────────
   brain:
     image: ollama/ollama:latest
     container_name: aetheris-brain
@@ -123,7 +127,7 @@ services:
       retries: 5
       start_period: 30s
 
-  # ── Janitor (Alpine — GFS Backup + 30-day Media Prune) ───────────────────────
+  # ── Janitor (Alpine — GFS Backup + 30-day Media Prune) ───────────────────────────────
   # TDR §4: Alpine, GFS Backup Shell, 30-day Pruning Logic
   janitor:
     build:
@@ -145,7 +149,7 @@ services:
       - BACKUP_INTERVAL_HOURS=24
       - PRUNE_INTERVAL_HOURS=6
 
-  # ── PostgreSQL Database ─────────────────────────────────────────────────────
+  # ── PostgreSQL Database ───────────────────────────────────────────────────
   ironclad-db:
     image: postgres:16-alpine
     container_name: aetheris-db
@@ -166,7 +170,7 @@ services:
       retries: 5
       start_period: 20s
 
-  # ── Redis Session Cache ─────────────────────────────────────────────────────
+  # ── Redis Session Cache ───────────────────────────────────────────────────
   ironclad-cache:
     image: redis:7-alpine
     container_name: aetheris-cache
@@ -182,7 +186,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── CSV Sync Worker ─────────────────────────────────────────────────────────
+  # ── CSV Sync Worker ───────────────────────────────────────────────────
   ironclad-csv-sync:
     build:
       context: ./csv-sync
@@ -203,7 +207,7 @@ services:
     volumes:
       - csv-exports:/app/exports
 
-  # ── ChromaDB Vector Store (RAG) ─────────────────────────────────────────────
+  # ── ChromaDB Vector Store (RAG) ───────────────────────────────────────────────
   ironclad-chroma:
     image: chromadb/chroma:latest
     container_name: aetheris-chroma
@@ -217,7 +221,7 @@ services:
       - IS_PERSISTENT=TRUE
       - ANONYMIZED_TELEMETRY=FALSE
 
-  # ── Media Asset Proxy ───────────────────────────────────────────────────────
+  # ── Media Asset Proxy ─────────────────────────────────────────────────────────────────
   media-proxy:
     build:
       context: ./media-proxy
@@ -231,7 +235,7 @@ services:
     volumes:
       - media-assets:/app/assets
 
-  # ── Pulse (Health Sentinel — Flask Sidecar) ──────────────────────────────────
+  # ── Pulse (Health Sentinel — Flask Sidecar) ──────────────────────────────────────────
   # TDR §5: Headless status reporting via Flask Pulse Web-UI (Port 58291)
   pulse:
     build:
@@ -256,7 +260,7 @@ services:
       timeout: 5s
       retries: 3
 
-  # ── Lavalink Audio Engine ───────────────────────────────────────────────────
+  # ── Lavalink Audio Engine ─────────────────────────────────────────────────────────────
   lavalink-audio:
     image: ghcr.io/lavalink-devs/lavalink:4
     container_name: aetheris-lavalink
@@ -274,3 +278,31 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # ── ComfyUI (Image Generation — Stable Diffusion) ─────────────────────────────────
+  # Optional: activate via White Portal → Settings → image_gen_backend=comfyui
+  # To skip image generation entirely, set image_gen_backend=disabled in settings.
+  # Models must be placed in the comfyui-models volume (see docs for instructions).
+  comfyui:
+    image: comfyanonymous/comfyui:latest
+    container_name: aetheris-comfyui
+    restart: unless-stopped
+    networks:
+      - aetheris_net
+    ports:
+      - "${COMFYUI_HOST_PORT:-8188}:8188"
+    volumes:
+      - comfyui-models:/app/models
+      - comfyui-output:/app/output
+    devices:
+      - /dev/dri:/dev/dri        # Intel GPU passthrough (shared with brain)
+    group_add:
+      - video
+    environment:
+      - CLI_ARGS=--listen 0.0.0.0
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8188/system_stats || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s

@@ -168,6 +168,14 @@ class ContextAssemblyPayload(BaseModel):
             "prevent context-window overflow."
         ),
     )
+    pdf_name_allowlist: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Lowercase proper-noun candidates extracted from active rulebook PDF chunks. "
+            "Brand-filter violations for terms on this list are suppressed so that "
+            "names canonically sourced from ingested PDFs are not falsely blocked."
+        ),
+    )
     assembled_at:       datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

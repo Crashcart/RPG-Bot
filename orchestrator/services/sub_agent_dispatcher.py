@@ -75,9 +75,18 @@ class SubAgentDispatcher:
     def __init__(self, node_router: "NodeRouter") -> None:
         self._node_router = node_router
 
-    async def dispatch_all(self, tasks: list[SubAgentTask]) -> list[SubAgentResult]:
+    async def dispatch_all(
+        self,
+        tasks: list[SubAgentTask],
+        pdf_allowlist: frozenset[str] = frozenset(),
+    ) -> list[SubAgentResult]:
         """
         Concurrently execute all sub-tasks and collect results.
+
+        ``pdf_allowlist`` is a frozenset of lowercase proper-noun candidates
+        extracted from the active campaign's ingested rulebook PDFs.  Brand-
+        filter violations for terms in this set are suppressed so that names
+        canonically sourced from PDFs are not falsely blocked.
 
         Returns results in the same order as the input list.  Tasks that
         fail after all retries return an empty raw_output so the GM can
@@ -87,7 +96,7 @@ class SubAgentDispatcher:
             return []
 
         raw_results = await asyncio.gather(
-            *[self._dispatch_one(task) for task in tasks],
+            *[self._dispatch_one(task, pdf_allowlist) for task in tasks],
             return_exceptions=True,
         )
 
@@ -112,14 +121,16 @@ class SubAgentDispatcher:
 
         return results
 
-    async def _dispatch_one(self, task: SubAgentTask) -> SubAgentResult:
+    async def _dispatch_one(
+        self,
+        task: SubAgentTask,
+        pdf_allowlist: frozenset[str] = frozenset(),
+    ) -> SubAgentResult:
         """
         Route a single task to the best available node, apply the brand
         filter with up to _MAX_RETRIES correction attempts, and return the
         (possibly stripped) result.
         """
-        from orchestrator.services.ollama_client import OllamaClient  # local import avoids cycles
-
         preferred_role = _TASK_ROLE_MAP.get(task.task_type, _ACTOR_ROLE)
 
         # Node selection: preferred role → narrative fallback → any Ollama
@@ -166,7 +177,7 @@ class SubAgentDispatcher:
 
             ttft_ms = int((time.monotonic() - t_start) * 1000)
 
-            violation = _detect_brand_violation(raw_output)
+            violation = _detect_brand_violation(raw_output, pdf_allowlist)
             if violation is None:
                 # Clean output — return immediately
                 return SubAgentResult(
@@ -200,7 +211,7 @@ class SubAgentDispatcher:
         )
         return SubAgentResult(
             task=task,
-            raw_output=_strip_brand_violations(raw_output),
+            raw_output=_strip_brand_violations(raw_output, pdf_allowlist),
             node_name=node_name,
             voice_id=voice_id,
             ttft_ms=ttft_ms,
@@ -210,18 +221,34 @@ class SubAgentDispatcher:
 
 # ── Brand Filter Utilities ────────────────────────────────────────────────────
 
-def _detect_brand_violation(text: str) -> str | None:
-    """Return the first prohibited brand name found (case-insensitive), or None."""
+def _detect_brand_violation(
+    text: str,
+    pdf_allowlist: frozenset[str] = frozenset(),
+) -> str | None:
+    """
+    Return the first prohibited brand name found (case-insensitive), or None.
+
+    Terms present in ``pdf_allowlist`` are skipped: they appear canonically
+    in the campaign's ingested rulebook PDFs and must not be blocked.
+    """
     lower = text.lower()
     for brand in BRAND_BLOCKLIST:
-        if brand in lower:
+        if brand in lower and brand not in pdf_allowlist:
             return brand
     return None
 
 
-def _strip_brand_violations(text: str) -> str:
-    """Replace all known brand names with [???] as a last-resort fallback."""
+def _strip_brand_violations(
+    text: str,
+    pdf_allowlist: frozenset[str] = frozenset(),
+) -> str:
+    """
+    Replace all known brand names with [???] as a last-resort fallback.
+    Terms present in ``pdf_allowlist`` are left untouched.
+    """
     for brand in BRAND_BLOCKLIST:
+        if brand in pdf_allowlist:
+            continue
         pattern = re.compile(re.escape(brand), re.IGNORECASE)
         text = pattern.sub("[???]", text)
     return text

@@ -1,0 +1,63 @@
+# compose.prod.yml — Production (main) tier overrides
+# Usage: docker compose -f docker-compose.yml -f compose.prod.yml up -d
+#
+# Production: warning-level logging, full resource caps, restart always,
+# explicit image tags (no :latest in prod).
+
+services:
+
+  scribe:
+    restart: always
+    environment:
+      - LOG_LEVEL=WARNING
+      - ENVIRONMENT=production
+    deploy:
+      resources:
+        limits:
+          cpus: '6'
+          memory: 6G
+        reservations:
+          cpus: '2'
+          memory: 2G
+
+  ironclad-discord:
+    restart: always
+    environment:
+      - LOG_LEVEL=WARNING
+      - ENVIRONMENT=production
+
+  brain:
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '8'
+          memory: 24G
+        reservations:
+          cpus: '4'
+          memory: 8G
+
+  ironclad-db:
+    restart: always
+    environment:
+      - POSTGRES_STATEMENT_TIMEOUT=30000
+
+  ironclad-cache:
+    restart: always
+
+  ironclad-chroma:
+    restart: always
+
+  media-proxy:
+    restart: always
+
+  pulse:
+    restart: always
+    environment:
+      - LOG_LEVEL=WARNING
+
+  lavalink-audio:
+    restart: always
+
+  janitor:
+    restart: always

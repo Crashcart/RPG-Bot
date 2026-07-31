@@ -26,9 +26,7 @@ The directive injection flow:
 
 from __future__ import annotations
 
-import json
 import logging
-from datetime import datetime, timezone
 from uuid import UUID
 
 from orchestrator.schemas.payloads import GMDirective, GMDirectiveRequest, DirectiveType

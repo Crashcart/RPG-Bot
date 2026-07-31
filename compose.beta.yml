@@ -1,0 +1,37 @@
+# compose.beta.yml — Beta tier overrides
+# Usage: docker compose -f docker-compose.yml -f compose.beta.yml up -d
+#
+# Beta mirrors production resource caps with info-level logging.
+# Smoke-testing tier before promotion to main.
+
+services:
+
+  scribe:
+    environment:
+      - LOG_LEVEL=INFO
+      - ENVIRONMENT=beta
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+
+  ironclad-discord:
+    environment:
+      - LOG_LEVEL=INFO
+      - ENVIRONMENT=beta
+
+  brain:
+    deploy:
+      resources:
+        limits:
+          cpus: '6'
+          memory: 16G
+
+  ironclad-db:
+    environment:
+      - POSTGRES_STATEMENT_TIMEOUT=60000
+
+  pulse:
+    environment:
+      - LOG_LEVEL=INFO

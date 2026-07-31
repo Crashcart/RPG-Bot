@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}Handouts{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1><span>📜</span> Handout Documents</h1>
+  <p>Create and deliver in-world documents to players. AI-authored or manually written.</p>
+</div>
+
+<!-- Campaign selector -->
+<div class="filter-bar">
+  <form method="get" style="display:flex;gap:8px;align-items:center;flex:1">
+    <select name="campaign_id" onchange="this.form.submit()" style="min-width:220px">
+      <option value="">— select campaign —</option>
+      {% for c in campaigns %}
+      <option value="{{ c.id }}" {% if c.id == campaign_id %}selected{% endif %}>
+        {{ c.name }}
+      </option>
+      {% endfor %}
+    </select>
+  </form>
+</div>
+
+{% if campaign_id %}
+
+<!-- Create handout -->
+<div class="card" style="margin-bottom:20px">
+  <div class="card-header">
+    <span class="card-title">Create Handout</span>
+  </div>
+  <div class="card-body">
+    <form method="post" action="/web/handouts/create?campaign_id={{ campaign_id }}">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div class="form-row">
+          <label>Title</label>
+          <input type="text" name="title" placeholder="Ancient Letter from House Valdris" required>
+        </div>
+        <div class="form-row">
+          <label>Type</label>
+          <select name="handout_type">
+            <option value="general">General</option>
+            <option value="letter">Letter</option>
+            <option value="journal">Journal Entry</option>
+            <option value="map">Map / Diagram</option>
+            <option value="notice">Notice / Poster</option>
+            <option value="codex">Codex Entry</option>
+            <option value="contract">Contract</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <label>GM Brief (AI authoring hint — not shown to players)</label>
+        <textarea name="brief" rows="3" placeholder="The letter is from the Count's steward, warning the players that the wards around the vault are failing..."></textarea>
+      </div>
+      <div class="form-row">
+        <label>Manual Content (leave empty to use AI authoring)</label>
+        <textarea name="content_text" rows="5" placeholder="Write the handout yourself here, or leave blank for Gemini to draft it from the brief above..."></textarea>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+        <label style="margin:0;display:flex;align-items:center;gap:8px;cursor:pointer">
+          <span class="toggle">
+            <input type="checkbox" name="is_global" value="1">
+            <span class="toggle-track"></span>
+            <span class="toggle-thumb"></span>
+          </span>
+          <span style="font-size:12px;color:var(--muted);text-transform:none;letter-spacing:0">
+            Global handout (visible to all players)
+          </span>
+        </label>
+        <div style="flex:1"></div>
+        <button type="submit" class="btn btn-gold">+ Create Handout</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Handout list -->
+{% if handouts %}
+<div class="card">
+  <div class="card-header">
+    <span class="card-title">Campaign Handouts</span>
+    <span class="text-muted" style="font-size:12px">{{ handouts|length }} document(s)</span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Title</th>
+          <th>Type</th>
+          <th>Scope</th>
+          <th>Created</th>
+          <th>Delivered to</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for h in handouts %}
+        <tr>
+          <td style="font-weight:600;color:var(--text)">{{ h.title }}</td>
+          <td><span class="badge badge-npc">{{ h.handout_type }}</span></td>
+          <td>
+            {% if h.is_global %}
+              <span class="badge badge-active">Global</span>
+            {% else %}
+              <span class="badge badge-inactive">Targeted</span>
+            {% endif %}
+          </td>
+          <td class="mono text-muted">{{ h.created_at.strftime('%Y-%m-%d %H:%M') if h.created_at else '—' }}</td>
+          <td class="text-muted">{{ h.recipient_count or 0 }} player(s)</td>
+          <td>
+            <details style="position:relative">
+              <summary class="expand-btn">View / Deliver ▾</summary>
+              <div style="
+                position:absolute;right:0;top:100%;z-index:50;min-width:380px;
+                background:var(--surface2);border:1px solid var(--border);
+                border-radius:var(--radius);padding:16px;box-shadow:0 8px 24px rgba(0,0,0,0.4);
+              ">
+                <p style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px">Document Content</p>
+                <div class="narrative-preview" style="max-height:160px;overflow-y:auto;white-space:pre-wrap">{{ h.content_text }}</div>
+                <hr>
+                <form method="post" action="/web/handouts/deliver?campaign_id={{ campaign_id }}" style="display:flex;gap:8px;align-items:flex-end">
+                  <input type="hidden" name="handout_id" value="{{ h.id }}">
+                  <div class="form-row" style="flex:1;margin:0">
+                    <label>Deliver to Player (Discord snowflake)</label>
+                    <input type="text" name="player_id" placeholder="123456789012345678">
+                  </div>
+                  <button type="submit" class="btn btn-gold btn-sm">Deliver</button>
+                </form>
+              </div>
+            </details>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<div class="empty">
+  <div class="empty-icon">📜</div>
+  <p>No handouts yet for this campaign. Create one above.</p>
+</div>
+{% endif %}
+
+{% else %}
+<div class="empty">
+  <div class="empty-icon">📂</div>
+  <p>Select a campaign to manage its handouts.</p>
+</div>
+{% endif %}
+
+{% endblock %}
