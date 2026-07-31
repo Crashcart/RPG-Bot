@@ -48,7 +48,8 @@ Statuses: `[x]` completed · `[-]` in-progress · `[ ]` not-started
 ## Backlog
 
 - [ ] `discord-bot/requirements.txt` — pin versions for all dependencies
-- [ ] Add `pytest` test suite scaffold under `orchestrator/tests/`
+- [x] Add `pytest` test suite scaffold under `orchestrator/tests/`
+- [ ] Extend pipeline phase tests — integration tests against a real Postgres/Redis (testcontainers)
 - [ ] Telemetry WebSocket — add reconnect logic on client disconnect
 - [ ] Rolling Vault — add configurable window size to White Portal settings
 - [ ] PropheticBuffer — expose cache hit rate via `/api/prophetic/stats` endpoint

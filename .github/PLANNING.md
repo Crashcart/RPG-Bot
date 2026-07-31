@@ -59,6 +59,13 @@ narrative. Real-world brand names are blocked by the existing post-processor unl
 appear in an ingested rulebook. This preserves licensed RPG content (e.g. a product that
 canonically names real brands) while blocking random real-world references.
 
+### 2026-07 — Pipeline phase unit tests
+All four pipeline phases (Ingestion, Adjudication, State Commit, Narration) now have isolated unit
+tests in `orchestrator/tests/test_pipeline_phases.py`. Tests cover helper functions (`_extract_pdf_names`,
+`_action_involves_vehicle`), the delegation contract for thin phases (Adjudication, Narration),
+and the full state-machine logic for State Commit (lethal detection, Redis pub/sub, vehicle delta
+routing). All service dependencies are mocked via `AsyncMock`/`MagicMock` — no live server required.
+
 ### 2025 — Pydantic payloads as the pipeline contract
 `orchestrator/schemas/payloads.py` is the single source of truth. All pipeline phases communicate
 exclusively through these models. This decision is frozen — it cannot be relaxed without a full
