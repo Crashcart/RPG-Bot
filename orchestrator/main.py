@@ -1096,6 +1096,11 @@ async def api_faction_standings(campaign_id: str, player_id: str) -> list[dict]:
     return await faction_svc.get_standings(player_id, campaign_id)
 
 
+@app.get("/api/prophetic/stats", summary="PropheticBuffer cache hit-rate and queue metrics")
+async def api_prophetic_stats() -> dict:
+    return prophetic_buffer.stats()
+
+
 @app.post("/api/music/feedback", summary="Submit music feedback (approve/disapprove)")
 async def api_music_feedback(req: dict) -> dict:
     campaign_id    = req.get("campaign_id", "")

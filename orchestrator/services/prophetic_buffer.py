@@ -83,10 +83,38 @@ class PropheticBuffer:
         self._queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=_MAX_QUEUE)
         self._task: asyncio.Task | None = None
         self._busy        = False
+        # Hit-rate counters (asyncio single-thread — no lock needed)
+        self._prefetch_count = 0
+        self._drop_count     = 0
+        self._text_hits      = 0
+        self._text_misses    = 0
+        self._audio_hits     = 0
+        self._audio_misses   = 0
 
     @property
     def is_busy(self) -> bool:
         return self._busy
+
+    def stats(self) -> dict:
+        """Return a snapshot of prefetch performance counters."""
+        total_text  = self._text_hits  + self._text_misses
+        total_audio = self._audio_hits + self._audio_misses
+        return {
+            "prefetch_count": self._prefetch_count,
+            "drop_count":     self._drop_count,
+            "queue_depth":    self._queue.qsize(),
+            "is_busy":        self._busy,
+            "text": {
+                "hits":     self._text_hits,
+                "misses":   self._text_misses,
+                "hit_rate": round(self._text_hits / total_text, 4) if total_text else 0.0,
+            },
+            "audio": {
+                "hits":     self._audio_hits,
+                "misses":   self._audio_misses,
+                "hit_rate": round(self._audio_hits / total_audio, 4) if total_audio else 0.0,
+            },
+        }
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -114,6 +142,7 @@ class PropheticBuffer:
         try:
             self._queue.put_nowait(result)
         except asyncio.QueueFull:
+            self._drop_count += 1
             logger.debug("PropheticBuffer queue full — prefetch dropped for intent %s",
                          result.intent.intent_id)
 
@@ -125,6 +154,7 @@ class PropheticBuffer:
             self._busy = True
             try:
                 await self._prefetch(result)
+                self._prefetch_count += 1
             except Exception as exc:
                 logger.debug("PropheticBuffer prefetch error (non-fatal): %s", exc)
             finally:
@@ -184,12 +214,22 @@ class PropheticBuffer:
 
     async def get_prefetched_text(self, intent_id: str) -> str | None:
         try:
-            return await self._cache.get(f"ironclad:prophet:{intent_id}:text")
+            value = await self._cache.get(f"ironclad:prophet:{intent_id}:text")
+            if value is not None:
+                self._text_hits += 1
+            else:
+                self._text_misses += 1
+            return value
         except Exception:
             return None
 
     async def get_prefetched_audio(self, intent_id: str) -> str | None:
         try:
-            return await self._cache.get(f"ironclad:prophet:{intent_id}:audio")
+            value = await self._cache.get(f"ironclad:prophet:{intent_id}:audio")
+            if value is not None:
+                self._audio_hits += 1
+            else:
+                self._audio_misses += 1
+            return value
         except Exception:
             return None
