@@ -1,0 +1,4 @@
+[2026-08-02T11:02:55Z] [INFO] [STARTUP] Scheduled execution agent initialized for crashcart/rpg-bot
+[2026-08-02T11:02:55Z] [CONFIG] Loaded .github/docker-optimization.md (Docker image optimization reference)
+[2026-08-02T11:02:55Z] [INFO] No copilot-instructions.md found — applying default priority rules
+[2026-08-02T11:02:55Z] [INFO] Initialized for crashcart/rpg-bot
