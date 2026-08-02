@@ -49,22 +49,22 @@ location, event, or plot thread that is EXPLICITLY established in the text. \
 Do not infer or speculate beyond what is stated.
 
 Output ONLY valid JSON matching this schema exactly:
-{
+{{
   "facts": [
-    {
+    {{
       "entity_type": "<npc|location|event|world_fact|plot_thread>",
       "entity_name": "<canonical short name>",
       "summary":     "<one sentence: what is true about this entity>",
       "detail":      "<optional extended context, max 300 chars>"
-    }
+    }}
   ]
-}
+}}
 
 Rules:
 - If the same entity appears multiple times, merge into one entry.
 - Do not include facts that were provided as prior context.
 - Do not include mechanical numbers (HP, dice results).
-- If nothing new is established, return {"facts": []}.
+- If nothing new is established, return {{"facts": []}}.
 
 NARRATIVE:
 {narrative}
