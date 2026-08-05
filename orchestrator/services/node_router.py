@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from orchestrator.config import Settings
     from orchestrator.services.database import DatabaseService
     from orchestrator.services.ollama_client import OllamaClient
+    from orchestrator.services.openai_compat_client import OpenAICompatClient
 
 logger = logging.getLogger(__name__)
 

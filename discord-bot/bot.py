@@ -2198,7 +2198,6 @@ async def slash_reputation(interaction: discord.Interaction) -> None:
     for s in standings:
         label  = s.get("label", "Neutral")
         score  = s.get("score", 0)
-        colour = _LABEL_COLOURS.get(label, 0x888888)
         bar    = _progress_bar(max(0, min(100, (score + 100) // 2)))
         embed.add_field(
             name=s.get("name", "Unknown"),

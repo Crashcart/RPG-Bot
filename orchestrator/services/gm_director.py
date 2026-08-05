@@ -86,8 +86,6 @@ from orchestrator.prompts.gm_prompts import (
     GM_SYSTEM_PROMPT,
     MUSIC_SCENE_PROMPTS,
     STRUCTURAL_PATTERNS,
-    SUBAGENT_SCENE_DESCRIBER_PROMPT,
-    SUBAGENT_SOUND_DIRECTOR_PROMPT,
 )
 from orchestrator.prompts.immersion_prompts import (
     AMBIENT_AUDIO_MAP,
@@ -99,7 +97,6 @@ from orchestrator.prompts.immersion_prompts import (
     is_combat_end,
 )
 from orchestrator.schemas.payloads import (
-    ActionOutcome,
     ChannelDirective,
     CharacterSnapshot,
     GMDirective,

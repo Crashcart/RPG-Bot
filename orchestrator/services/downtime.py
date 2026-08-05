@@ -25,7 +25,6 @@ formalise must be applied by the admin via the White Portal.
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timedelta, timezone
 from uuid import UUID

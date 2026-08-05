@@ -12,7 +12,6 @@ import logging
 from typing import TYPE_CHECKING
 
 from orchestrator.schemas.payloads import (
-    CharacterSnapshot,
     ContextAssemblyPayload,
     IntentPayload,
 )
