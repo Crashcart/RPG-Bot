@@ -12,6 +12,7 @@ FastAPI application that drives the four-phase pipeline:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -37,7 +38,6 @@ from orchestrator.pipeline import (
 from orchestrator.routers import auth_router, web_router
 from orchestrator.schemas.payloads import (
     CampfireStatus,
-    DirectiveType,
     DowntimeSubmitRequest,
     DowntimeTaskStatus,
     GMDirective,
@@ -1121,7 +1121,6 @@ async def api_music_feedback(req: dict) -> dict:
 async def api_music_generate(req: dict) -> dict:
     from orchestrator.prompts.gm_prompts import MUSIC_SCENE_PROMPTS
     scene_type  = req.get("scene_type", "exploration")
-    campaign_id = req.get("campaign_id", "")
     music_prompt = MUSIC_SCENE_PROMPTS.get(scene_type, MUSIC_SCENE_PROMPTS["exploration"])
     audio_url = await gemini.generate_music(music_prompt, scene_type, db=db)
     return {
@@ -1220,7 +1219,6 @@ async def telemetry_websocket(websocket: WebSocket):
     Requires an authenticated admin session (session cookie must be present).
     Replays the last 200 events on connect, then streams live.
     """
-    import asyncio
 
     # Auth check — session cookie must carry admin_id
     session = websocket.session if hasattr(websocket, "session") else {}
