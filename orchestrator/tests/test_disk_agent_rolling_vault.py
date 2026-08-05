@@ -4,15 +4,12 @@ Unit tests for DiskAgentService and RollingVault.
 
 from __future__ import annotations
 
-import asyncio
-import tempfile
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from orchestrator.services.disk_agent import DiskAgentService
-from orchestrator.services.rolling_vault import RollingVault, WINDOW_SIZE, COMPRESS_BATCH
+from orchestrator.services.rolling_vault import RollingVault, WINDOW_SIZE
 
 
 # ─────────────────────────────────────────────────────────────────────────────

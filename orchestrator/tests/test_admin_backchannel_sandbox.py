@@ -5,7 +5,7 @@ Unit tests for AdminBackchannelService and SandboxService.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
 import pytest
@@ -364,7 +364,7 @@ class TestSandboxChat:
         svc, gemini, _, _, _ = _make_sandbox()
         gemini.generate_with_image = AsyncMock(return_value="A dark forest scene.")
 
-        result = await svc.chat("Describe this", CAMPAIGN_ID, image_url="http://host/img.png")
+        await svc.chat("Describe this", CAMPAIGN_ID, image_url="http://host/img.png")
         call_kwargs = gemini.generate.call_args.kwargs
         user_prompt = call_kwargs.get("user_prompt", "") or gemini.generate.call_args.args[1]
         assert "A dark forest scene." in user_prompt
