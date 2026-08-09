@@ -1,0 +1,47 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/**"
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: Orchestrator Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('orchestrator/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r orchestrator/requirements.txt
+          pip install pytest pytest-asyncio
+
+      - name: Run tests
+        run: |
+          if [ -d "orchestrator/tests" ] && [ -n "$(ls orchestrator/tests/test_*.py 2>/dev/null)" ]; then
+            pytest orchestrator/tests/ -v --tb=short
+          else
+            echo "No test files found yet — CI skeleton is ready for incoming test PRs."
+            exit 0
+          fi
