@@ -806,6 +806,148 @@ class DatabaseService:
             UUID(campaign_id), entity_type, entity_name,
         )
 
+    # ── Campaign Management ───────────────────────────────────────────────────
+
+    async def create_campaign(
+        self,
+        guild_id: str,
+        name: str,
+        system: str,
+        settings: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Insert a new campaign row and return its full record."""
+        row = await self.pool.fetchrow(
+            """
+            INSERT INTO campaigns (guild_id, name, system, settings)
+            VALUES ($1, $2, $3, $4::jsonb)
+            RETURNING id, guild_id, name, system, active, settings, created_at
+            """,
+            guild_id, name, system, json.dumps(settings or {}),
+        )
+        return {
+            "id":         str(row["id"]),
+            "guild_id":   row["guild_id"],
+            "name":       row["name"],
+            "system":     row["system"],
+            "active":     row["active"],
+            "settings":   json.loads(row["settings"]) if isinstance(row["settings"], str) else dict(row["settings"]),
+            "created_at": row["created_at"],
+        }
+
+    async def get_campaign_by_id(self, campaign_id: str) -> dict[str, Any] | None:
+        """Fetch a single campaign by UUID (includes inactive)."""
+        row = await self.pool.fetchrow(
+            """
+            SELECT c.id, c.guild_id, c.name, c.system, c.active, c.settings, c.created_at,
+                   COUNT(DISTINCT ch.id) FILTER (WHERE ch.status = 'ALIVE') AS character_count,
+                   COUNT(DISTINCT sc.id) AS fact_count
+            FROM campaigns c
+            LEFT JOIN characters ch ON ch.campaign_id = c.id
+            LEFT JOIN story_context sc ON sc.campaign_id = c.id
+            WHERE c.id = $1
+            GROUP BY c.id
+            """,
+            UUID(campaign_id),
+        )
+        if not row:
+            return None
+        return {
+            "id":              str(row["id"]),
+            "guild_id":        row["guild_id"],
+            "name":            row["name"],
+            "system":          row["system"],
+            "active":          row["active"],
+            "settings":        json.loads(row["settings"]) if isinstance(row["settings"], str) else dict(row["settings"]),
+            "character_count": row["character_count"],
+            "fact_count":      row["fact_count"],
+            "created_at":      row["created_at"],
+        }
+
+    async def list_campaigns_by_guild(self, guild_id: str) -> list[dict[str, Any]]:
+        """Return all campaigns (active and inactive) for a guild, newest first."""
+        rows = await self.pool.fetch(
+            """
+            SELECT c.id, c.guild_id, c.name, c.system, c.active, c.settings, c.created_at,
+                   COUNT(DISTINCT ch.id) FILTER (WHERE ch.status = 'ALIVE') AS character_count,
+                   COUNT(DISTINCT sc.id) AS fact_count
+            FROM campaigns c
+            LEFT JOIN characters ch ON ch.campaign_id = c.id
+            LEFT JOIN story_context sc ON sc.campaign_id = c.id
+            WHERE c.guild_id = $1
+            GROUP BY c.id
+            ORDER BY c.created_at DESC
+            """,
+            guild_id,
+        )
+        return [
+            {
+                "id":              str(r["id"]),
+                "guild_id":        r["guild_id"],
+                "name":            r["name"],
+                "system":          r["system"],
+                "active":          r["active"],
+                "settings":        json.loads(r["settings"]) if isinstance(r["settings"], str) else dict(r["settings"]),
+                "character_count": r["character_count"],
+                "fact_count":      r["fact_count"],
+                "created_at":      r["created_at"],
+            }
+            for r in rows
+        ]
+
+    async def update_campaign(
+        self,
+        campaign_id: str,
+        name: str | None = None,
+        system: str | None = None,
+        settings: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Partial update of a campaign. Returns updated record, or None if not found."""
+        set_clauses: list[str] = ["updated_at = NOW()"]
+        params: list[Any] = []
+        idx = 1
+
+        if name is not None:
+            set_clauses.append(f"name = ${idx}")
+            params.append(name)
+            idx += 1
+        if system is not None:
+            set_clauses.append(f"system = ${idx}")
+            params.append(system)
+            idx += 1
+        if settings is not None:
+            set_clauses.append(f"settings = ${idx}::jsonb")
+            params.append(json.dumps(settings))
+            idx += 1
+
+        params.append(UUID(campaign_id))
+        row = await self.pool.fetchrow(
+            f"""
+            UPDATE campaigns SET {', '.join(set_clauses)}
+            WHERE id = ${idx}
+            RETURNING id, guild_id, name, system, active, settings, created_at
+            """,
+            *params,
+        )
+        if not row:
+            return None
+        return {
+            "id":       str(row["id"]),
+            "guild_id": row["guild_id"],
+            "name":     row["name"],
+            "system":   row["system"],
+            "active":   row["active"],
+            "settings": json.loads(row["settings"]) if isinstance(row["settings"], str) else dict(row["settings"]),
+            "created_at": row["created_at"],
+        }
+
+    async def deactivate_campaign(self, campaign_id: str) -> bool:
+        """Soft-delete a campaign by setting active=FALSE. Returns True if a row was updated."""
+        result = await self.pool.execute(
+            "UPDATE campaigns SET active = FALSE, updated_at = NOW() WHERE id = $1 AND active = TRUE",
+            UUID(campaign_id),
+        )
+        return result != "UPDATE 0"
+
     # ── Rule Registry ─────────────────────────────────────────────────────────
 
     async def get_active_rule_modules(self, campaign_id: str) -> list[dict[str, Any]]:
