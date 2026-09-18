@@ -840,3 +840,35 @@ class GMDirective(BaseModel):
     status:          str  = "pending"    # pending | consumed | cancelled
     submitted_at:    datetime
     consumed_at:     datetime | None = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Campaign Management Schemas
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CampaignCreateRequest(BaseModel):
+    """Create a new campaign for a Discord guild."""
+    guild_id:  str              = Field(..., description="Discord server snowflake ID")
+    name:      str              = Field(..., description="Campaign display name", min_length=1, max_length=120)
+    system:    str              = Field(..., description="TTRPG system name (e.g. 'D&D 5e', 'Mothership')", min_length=1, max_length=80)
+    settings:  dict[str, Any]  = Field(default_factory=dict, description="Campaign-level rule overrides")
+
+
+class CampaignUpdateRequest(BaseModel):
+    """Partial update for a campaign — all fields optional."""
+    name:     str | None             = Field(default=None, min_length=1, max_length=120)
+    system:   str | None             = Field(default=None, min_length=1, max_length=80)
+    settings: dict[str, Any] | None  = Field(default=None)
+
+
+class CampaignResponse(BaseModel):
+    """API representation of a campaign row."""
+    id:              str
+    guild_id:        str
+    name:            str
+    system:          str
+    active:          bool
+    settings:        dict[str, Any]  = Field(default_factory=dict)
+    character_count: int             = 0
+    fact_count:      int             = 0
+    created_at:      datetime

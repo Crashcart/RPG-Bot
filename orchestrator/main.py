@@ -36,6 +36,9 @@ from orchestrator.pipeline import (
 )
 from orchestrator.routers import auth_router, web_router
 from orchestrator.schemas.payloads import (
+    CampaignCreateRequest,
+    CampaignResponse,
+    CampaignUpdateRequest,
     CampfireStatus,
     DirectiveType,
     DowntimeSubmitRequest,
@@ -653,6 +656,115 @@ async def api_active_campaign(guild_id: str) -> dict:
     if not campaign:
         raise HTTPException(status_code=404, detail=f"No active campaign for guild {guild_id}.")
     return campaign
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Campaign Management REST API
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get(
+    "/api/campaigns",
+    summary="List campaigns for a guild (or all campaigns if no guild_id supplied)",
+    tags=["campaigns"],
+)
+async def api_list_campaigns(guild_id: str | None = None) -> list[dict]:
+    """
+    Return campaigns for a specific guild, or every active campaign across all
+    guilds when `guild_id` is omitted.  Includes inactive campaigns when
+    filtering by guild so admins can see the full campaign history.
+    """
+    if guild_id:
+        return await db.list_campaigns_by_guild(guild_id)
+    return await db.get_all_campaigns()
+
+
+@app.post(
+    "/api/campaigns",
+    response_model=CampaignResponse,
+    summary="Create a new campaign for a Discord guild",
+    status_code=201,
+    tags=["campaigns"],
+)
+async def api_create_campaign(req: CampaignCreateRequest) -> CampaignResponse:
+    """
+    Create a campaign.  Multiple campaigns can co-exist in the same guild;
+    only one may be *active* at a time (the first pipeline action after
+    creation will use the most-recently activated campaign for the guild).
+    """
+    try:
+        row = await db.create_campaign(
+            guild_id=req.guild_id,
+            name=req.name,
+            system=req.system,
+            settings=req.settings,
+        )
+    except Exception as exc:
+        # Unique constraint on (guild_id, name) raises asyncpg.UniqueViolationError
+        detail = str(exc)
+        if "unique" in detail.lower() or "duplicate" in detail.lower():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"A campaign named '{req.name}' already exists for this guild.",
+            )
+        logger.exception("Campaign creation failed: %s", exc)
+        raise HTTPException(status_code=500, detail=detail)
+
+    return CampaignResponse(**row, character_count=0, fact_count=0)
+
+
+@app.get(
+    "/api/campaigns/{campaign_id}",
+    response_model=CampaignResponse,
+    summary="Get a campaign by ID",
+    tags=["campaigns"],
+)
+async def api_get_campaign(campaign_id: str) -> CampaignResponse:
+    row = await db.get_campaign_by_id(campaign_id)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Campaign {campaign_id} not found.")
+    return CampaignResponse(**row)
+
+
+@app.patch(
+    "/api/campaigns/{campaign_id}",
+    response_model=CampaignResponse,
+    summary="Update a campaign's name, system, or settings",
+    tags=["campaigns"],
+)
+async def api_update_campaign(campaign_id: str, req: CampaignUpdateRequest) -> CampaignResponse:
+    """Partial update — only supplied fields are changed."""
+    if req.name is None and req.system is None and req.settings is None:
+        raise HTTPException(status_code=400, detail="At least one field must be provided for update.")
+    row = await db.update_campaign(
+        campaign_id,
+        name=req.name,
+        system=req.system,
+        settings=req.settings,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Campaign {campaign_id} not found.")
+    return CampaignResponse(**row, character_count=0, fact_count=0)
+
+
+@app.delete(
+    "/api/campaigns/{campaign_id}",
+    summary="Deactivate (soft-delete) a campaign",
+    status_code=200,
+    tags=["campaigns"],
+)
+async def api_deactivate_campaign(campaign_id: str) -> dict:
+    """
+    Sets `active = FALSE` on the campaign.  All related data (characters,
+    inventories, action_log entries) is preserved; the campaign simply stops
+    being eligible for pipeline actions.
+    """
+    deactivated = await db.deactivate_campaign(campaign_id)
+    if not deactivated:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Campaign {campaign_id} not found or already inactive.",
+        )
+    return {"status": "deactivated", "campaign_id": campaign_id}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
