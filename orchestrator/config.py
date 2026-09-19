@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     chroma_host: str = "ironclad-chroma"
     chroma_port: int = 8000
 
+    # ── NATS JetStream (multi-agent message bus) ──────────────────────────────
+    # Leave blank to disable NATS — the pipeline degrades gracefully.
+    nats_url: str = "nats://aetheris-nats:4222"
+
     # ── Media Proxy ───────────────────────────────────────────────────────────
     media_proxy_url: str = "http://media-asset-proxy:8001"
 
