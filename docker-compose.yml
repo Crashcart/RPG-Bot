@@ -35,6 +35,7 @@ volumes:
   ollama-models:
   csv-exports:
   media-assets:
+  nats-data:
   pdf-uploads:
 
 services:
@@ -71,6 +72,9 @@ services:
         condition: service_started
       ironclad-chroma:
         condition: service_started
+      aetheris-nats:
+        condition: service_healthy
+        required: false   # graceful degradation — pipeline starts without NATS
     volumes:
       - ./data:/app/data          # shared global data (TDR §2)
       - ./logs:/app/logs          # structured logs
@@ -255,6 +259,29 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+  # ── NATS JetStream (Multi-Agent Message Bus) ─────────────────────────────────
+  # TDR §2: high-speed inter-agent pub/sub. Not exposed externally.
+  aetheris-nats:
+    image: nats:2.10-alpine
+    container_name: aetheris-nats
+    restart: unless-stopped
+    networks:
+      - aetheris_net
+    command: >
+      --jetstream
+      --store_dir /data
+      --max_memory_store 128MB
+      --max_file_store 1GB
+      --name aetheris-nats
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   # ── Lavalink Audio Engine ───────────────────────────────────────────────────
   lavalink-audio:

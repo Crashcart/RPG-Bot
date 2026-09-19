@@ -1,0 +1,6 @@
+[2026-09-19T00:00:00Z] [INFO] [STARTUP] Scheduled autonomous development run initiated
+[2026-09-19T00:00:00Z] [CONFIG] Loaded .github/docker-optimization.md — Docker image optimization guide (reference only, no TIER/label/filter rules)
+[2026-09-19T00:00:00Z] [INFO] No .github/copilot-instructions.md found — no additional rule configuration
+[2026-09-19T00:00:00Z] [INFO] No .github/ISSUE_TEMPLATE or .github/PULL_REQUEST_TEMPLATE found
+[2026-09-19T00:00:00Z] [INFO] CLAUDE.md loaded — project context: Ironclad GM, active branch: claude/api-payload-schemas-0jkYr
+[2026-09-19T00:00:00Z] [INFO] Initialized for crashcart/rpg-bot

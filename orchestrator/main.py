@@ -85,6 +85,7 @@ from orchestrator.services.rolling_vault    import RollingVault
 from orchestrator.services.sic              import SystemIntegrityCheck
 from orchestrator.services.world_registry   import WorldRegistry
 from orchestrator.services.pdf_processor    import PDFProcessorService
+from orchestrator.services.nats_bus         import NatsBus
 from orchestrator.schemas.world_schema      import WorldSchema, WorldSwitchRequest, WorldSwitchResponse
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -149,6 +150,9 @@ janitor = JanitorService(
 
 # ── World Registry (dynamic genre discovery + schema cache) ───────────────────
 world_registry = WorldRegistry(data_dir=settings.world_data_dir, reality_wall=reality_wall)
+
+# ── NATS JetStream (multi-agent message bus — TDR §2) ─────────────────────────
+nats_bus = NatsBus(nats_url=settings.nats_url)
 
 # ── System Integrity Check (SIC) ──────────────────────────────────────────────
 # TDR §1: four-pillar verifier — runs on startup, on-demand, and post-backup.
@@ -231,6 +235,7 @@ async def lifespan(app: FastAPI):
     rolling_vault.bind(db.pool)      # Step 5: bind pool now that db.connect() is done
     await prophetic_buffer.start()
     await janitor.start()
+    await nats_bus.connect()    # graceful degradation — pipeline starts even if NATS is down
 
     # ── System Integrity Check (TDR §1) ──────────────────────────────────────
     # Inject cache reference now that cache is connected.
@@ -277,6 +282,7 @@ async def lifespan(app: FastAPI):
         pass
     await prophetic_buffer.stop()
     await janitor.stop()
+    await nats_bus.disconnect()
     await node_router.stop()
     await db.disconnect()
     await cache.disconnect()
