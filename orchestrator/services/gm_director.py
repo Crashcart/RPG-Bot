@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     from orchestrator.services.story_memory          import StoryMemoryService
     from orchestrator.services.sub_agent_dispatcher  import SubAgentDispatcher
     from orchestrator.services.telemetry             import TelemetryService
+    from orchestrator.services.whisper_service       import WhisperService
     from orchestrator.services.world_registry        import WorldRegistry
 
 import asyncio
@@ -149,6 +150,7 @@ class GMDirector:
         elevenlabs:     "ElevenLabsClient | None" = None,
         handout_svc:    "HandoutService | None" = None,
         faction_svc:    "FactionService | None" = None,
+        whisper_svc:    "WhisperService | None" = None,
         db=None,
     ) -> None:
         self._gemini         = gemini
@@ -165,6 +167,7 @@ class GMDirector:
         self._elevenlabs     = elevenlabs
         self._handout_svc    = handout_svc
         self._faction_svc    = faction_svc
+        self._whisper_svc    = whisper_svc
         self._db             = db
 
     # ── Public Interface ───────────────────────────────────────────────────────
@@ -325,18 +328,67 @@ class GMDirector:
             except Exception as _wt_exc:
                 logger.debug("World tone injection failed (non-fatal): %s", _wt_exc)
 
+        # ── Whisper Protocol: resolve hidden state ────────────────────────────
+        # Whisper fires when:
+        #   (a) NPC dialogue tasks are present (existing behaviour), OR
+        #   (b) WhisperService.should_trigger_whisper() returns True for this action
+        hidden_context: str = ""
         has_npc_tasks = any(r.task.task_type == "npc_dialogue" for r in sub_results)
+        whisper_eligible = has_npc_tasks
+
+        if self._whisper_svc:
+            try:
+                hidden_state = await self._whisper_svc.get_hidden_state(character.character_id)
+                if self._whisper_svc.should_trigger_whisper(
+                    action_type=resolution.action_type,
+                    reasoning=resolution.reasoning,
+                    outcome=resolution.outcome.value,
+                    hidden_state=hidden_state,
+                ):
+                    # Rate-limit hidden checks to prevent spam
+                    allowed = await self._whisper_svc.check_rate_limit(character.character_id)
+                    if allowed:
+                        whisper_eligible = True
+                        hidden_context = self._whisper_svc.build_hidden_context(hidden_state)
+
+                # Apply hidden_state_delta from Phase 2 if present
+                if resolution.hidden_state_delta and self._db:
+                    asyncio.create_task(
+                        self._whisper_svc.apply_delta(
+                            character_id=character.character_id,
+                            campaign_id=campaign_id,
+                            intent_id=resolution.intent_id,
+                            delta=resolution.hidden_state_delta,
+                        )
+                    )
+            except Exception as ws_exc:
+                logger.debug("WhisperService lookup failed (non-fatal): %s", ws_exc)
+
         synthesis_coro = storyteller.generate(
             system_prompt=synthesis_system,
             user_prompt=synthesis_prompt,
             max_tokens=_SYNTHESIS_MAX_TOKENS,
         )
         whisper_coro = (
-            self._generate_whisper(storyteller, resolution, plan, sub_results, player_intent)
-            if has_npc_tasks else asyncio.sleep(0, result=None)
+            self._generate_whisper(
+                storyteller, resolution, plan, sub_results, player_intent, hidden_context
+            )
+            if whisper_eligible else asyncio.sleep(0, result=None)
         )
 
         raw_narrative, whisper_text = await asyncio.gather(synthesis_coro, whisper_coro)
+
+        # Persist whisper text to the audit log when WhisperService is active
+        if whisper_text and self._whisper_svc and resolution.hidden_state_delta:
+            asyncio.create_task(
+                self._whisper_svc.apply_delta(
+                    character_id=character.character_id,
+                    campaign_id=campaign_id,
+                    intent_id=resolution.intent_id,
+                    delta=resolution.hidden_state_delta,
+                    whisper_text=whisper_text,
+                )
+            )
 
         # ── Step 4d: Structural Text Filter ───────────────────────────────────
         final_narrative, stripped_count = _strip_structural_text(raw_narrative)
@@ -481,16 +533,22 @@ class GMDirector:
     async def _generate_whisper(
         self,
         storyteller,
-        resolution:    OllamaResolutionPayload,
-        plan:          GMPlanResult,
+        resolution:     OllamaResolutionPayload,
+        plan:           GMPlanResult,
         sub_results,
-        player_intent: str,
+        player_intent:  str,
+        hidden_context: str = "",
     ) -> str | None:
         """
         Generate the secret private-perception DM whisper in parallel with synthesis.
 
-        Fires only when NPC dialogue sub-tasks are present.  A failed whisper
-        silently returns None — the main narrative is unaffected.
+        Fires when NPC dialogue tasks are present OR when WhisperService flags
+        a horror/sanity action. A failed whisper silently returns None — the main
+        narrative is unaffected.
+
+        hidden_context: pre-formatted psychological state block from WhisperService.
+        When non-empty it is prepended to the system prompt so the LLM knows the
+        player's sanity level and active conditions without exposing numbers.
         """
         npc_names = ", ".join(
             r.task.entity_name for r in sub_results
@@ -500,12 +558,19 @@ class GMDirector:
 
         whisper_prompt = WHISPER_PROMPT.format(
             narrative_summary=player_intent[:200],
-            npc_list=npc_names or "unspecified NPC",
+            npc_list=npc_names or "environment",
             mechanical_outcome=outcome_str,
         )
+
+        system = (
+            f"{hidden_context}\n\n{WHISPER_SYSTEM_PROMPT}"
+            if hidden_context
+            else WHISPER_SYSTEM_PROMPT
+        )
+
         try:
             text = await storyteller.generate(
-                system_prompt=WHISPER_SYSTEM_PROMPT,
+                system_prompt=system,
                 user_prompt=whisper_prompt,
                 max_tokens=_WHISPER_MAX_TOKENS,
             )
