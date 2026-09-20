@@ -216,6 +216,27 @@ class VehicleDelta(BaseModel):
     subsystems:  list[SubsystemDelta] = Field(default_factory=list)
 
 
+class HiddenStateDelta(BaseModel):
+    """
+    Psychological state mutation produced by the mechanical engine for horror/sanity actions.
+    Applied atomically in Phase 3 alongside the public StateDelta.
+    Never surfaced to the player directly — consumed only by WhisperService and GMDirector.
+    """
+    sanity_delta:  int              = Field(default=0, description="Negative = sanity drain")
+    flags_set:     dict[str, bool]  = Field(
+        default_factory=dict,
+        description="Boolean flags to set on hidden_state (e.g. {'paranoid': True})",
+    )
+    flags_cleared: list[str]        = Field(
+        default_factory=list,
+        description="Flag keys to remove from hidden_state",
+    )
+    trigger_reason: str             = Field(
+        default="",
+        description="Why this delta was triggered (e.g. 'eldritch_gaze', 'horror_witness')",
+    )
+
+
 class StateDelta(BaseModel):
     """
     The set of character state changes produced by mechanical resolution.
@@ -251,6 +272,12 @@ class OllamaResolutionPayload(BaseModel):
     roll_result:        int  = Field(..., description="Final total after modifiers")
     outcome:            ActionOutcome
     state_delta:        StateDelta
+    hidden_state_delta: HiddenStateDelta | None = Field(
+        default=None,
+        description="Optional psychological state mutation for horror/sanity actions. "
+                    "Non-null when the action triggers a Whisper Protocol check. "
+                    "Never surfaced to the player.",
+    )
     rulebook_citations: list[str]  = Field(default_factory=list)
     reasoning:          str        = Field(
         default="",
